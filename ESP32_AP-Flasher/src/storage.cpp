@@ -59,25 +59,29 @@ static void initSDCard() {
     contentFS = &SD_MMC;
 }
 #else
-static SPIClass* spi;
+static SPIClass* spi = nullptr;
 
 static void initSDCard() {
-    uint8_t spi_bus = VSPI;
 
-    // SD.begin and spi.begin are allocating memory so we dont want to do that
-    if(!spi) { 
-        spi = new SPIClass(spi_bus);
-        spi->begin(SD_CARD_CLK, SD_CARD_MISO, SD_CARD_MOSI, SD_CARD_SS);
+    // SD.begin and spi.begin allocate memory, so only do this once
+    if (!spi) {
+        spi = new SPIClass();
+        spi->begin(
+            SD_CARD_CLK,
+            SD_CARD_MISO,
+            SD_CARD_MOSI,
+            SD_CARD_SS
+        );
 
-        bool res = SD.begin(SD_CARD_SS, *spi, 40000000);
-        if (!res) {
+        if (!SD.begin(SD_CARD_SS, *spi, 40000000)) {
             Serial.println("Card Mount Failed");
+            delete spi;
+            spi = nullptr;
             return;
         }
     }
 
     uint8_t cardType = SD.cardType();
-
     if (cardType == CARD_NONE) {
         Serial.println("No SD card attached");
         return;
@@ -91,7 +95,10 @@ static void initSDCard() {
 uint64_t DynStorage::freeSpace(){
     this->begin();
 #ifdef HAS_SDCARD
-    return SDCARD.totalBytes() - SDCARD.usedBytes();
+    if (spi != nullptr) {
+        return SDCARD.totalBytes() - SDCARD.usedBytes();
+    }
+    return LittleFS.totalBytes() - LittleFS.usedBytes();
 #endif
 #ifndef SD_CARD_ONLY
     return LittleFS.totalBytes() - LittleFS.usedBytes();

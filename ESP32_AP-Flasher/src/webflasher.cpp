@@ -182,7 +182,7 @@ void onClientConnect(void* arg, AsyncClient* client) {
             connectedClient = NULL;
         });
     } else {
-        client->close(true);
+        client->close();
     }
 }
 

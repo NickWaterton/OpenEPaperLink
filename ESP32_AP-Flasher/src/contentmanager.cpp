@@ -679,7 +679,7 @@ void replaceVariables(String &format) {
     setVarDB("ap_time", timeBuffer, false);
 
     while ((openBraceIndex = format.indexOf('{', startIndex)) != -1 &&
-           (closeBraceIndex = format.indexOf('}', openBraceIndex + 1)) != -1) {
+        (closeBraceIndex = format.indexOf('}', openBraceIndex + 1)) != -1) {
         const std::string variableName = format.substring(openBraceIndex + 1, closeBraceIndex).c_str();
         const std::string varKey = "{" + variableName + "}";
         const auto var = varDB.find(variableName);
@@ -694,68 +694,69 @@ void replaceVariables(String &format) {
 
 void drawString(TFT_eSprite &spr, String content, int16_t posx, int16_t posy, String font, byte align, uint16_t color, uint16_t size, uint16_t bgcolor) {
     // drawString(spr,"test",100,10,"bahnschrift30",TC_DATUM,TFT_RED);
-
-    // backwards compitibility
-    replaceVariables(content);
-    if (font.startsWith("fonts/calibrib")) {
-        String numericValueStr = font.substring(14);
-        int calibriSize = numericValueStr.toInt();
-        if (calibriSize != 30 && calibriSize != 16) {
-            font = "Signika-SB.ttf";
-            size = calibriSize;
+    if (content && content[0] != 0) {
+        // backwards compatibility
+        replaceVariables(content);
+        if (font.startsWith("fonts/calibrib")) {
+            String numericValueStr = font.substring(14);
+            int calibriSize = numericValueStr.toInt();
+            if (calibriSize != 30 && calibriSize != 16) {
+                font = "Signika-SB.ttf";
+                size = calibriSize;
+            }
         }
-    }
-    if (font == "glasstown_nbp_tf") {
-        font = "tahoma9.vlw";
-        posy -= 8;
-    }
-    if (font == "7x14_tf") {
-        font = "REFSAN12.vlw";
-        posy -= 10;
-    }
-    if (font == "t0_14b_tf") {
-        font = "calibrib16.vlw";
-        posy -= 11;
-    }
+        if (font == "glasstown_nbp_tf") {
+            font = "tahoma9.vlw";
+            posy -= 8;
+        }
+        if (font == "7x14_tf") {
+            font = "REFSAN12.vlw";
+            posy -= 10;
+        }
+        if (font == "t0_14b_tf") {
+            font = "calibrib16.vlw";
+            posy -= 11;
+        }
 
-    switch (processFontPath(font)) {
-        case 2: {
-            // truetype
-            time_t t = millis();
-            truetypeClass truetype = truetypeClass();
-            void *framebuffer = spr.getPointer();
-            truetype.setFramebuffer(spr.width(), spr.height(), spr.getColorDepth(), static_cast<uint8_t *>(framebuffer));
-            File fontFile = contentFS->open(font, "r");
-            if (!truetype.setTtfFile(fontFile)) {
-                Serial.println("read ttf failed");
-                return;
-            }
+        switch (processFontPath(font)) {
+            case 2: {
+                // truetype
+                time_t t = millis();
+                truetypeClass truetype = truetypeClass();
+                void *framebuffer = spr.getPointer();
+                truetype.setFramebuffer(spr.width(), spr.height(), spr.getColorDepth(), static_cast<uint8_t *>(framebuffer));
+                File fontFile = contentFS->open(font, "r");
+                if (!truetype.setTtfFile(fontFile)) {
+                    Serial.println("read ttf failed");
+                    return;
+                }
 
-            truetype.setCharacterSize(size);
-            truetype.setCharacterSpacing(0);
-            if (align == TC_DATUM) {
-                posx -= truetype.getStringWidth(content) / 2;
+                truetype.setCharacterSize(size);
+                truetype.setCharacterSpacing(0);
+                if (align == TC_DATUM) {
+                    posx -= truetype.getStringWidth(content) / 2;
+                }
+                if (align == TR_DATUM) {
+                    posx -= truetype.getStringWidth(content);
+                }
+                truetype.setTextBoundary(posx, spr.width(), spr.height());
+                if (spr.getColorDepth() == 8) {
+                    truetype.setTextColor(spr.color16to8(color), spr.color16to8(color));
+                } else {
+                    truetype.setTextColor(color, color);
+                }
+                truetype.textDraw(posx, posy, content);
+                truetype.end();
+            } break;
+            case 3: {
+                // vlw bitmap font
+                spr.setTextDatum(align);
+                if (font != "") spr.loadFont(font.substring(1), *contentFS);
+                spr.setTextColor(color, bgcolor);
+                spr.setTextWrap(false, false);
+                spr.drawString(content, posx, posy);
+                if (font != "") spr.unloadFont();
             }
-            if (align == TR_DATUM) {
-                posx -= truetype.getStringWidth(content);
-            }
-            truetype.setTextBoundary(posx, spr.width(), spr.height());
-            if (spr.getColorDepth() == 8) {
-                truetype.setTextColor(spr.color16to8(color), spr.color16to8(color));
-            } else {
-                truetype.setTextColor(color, color);
-            }
-            truetype.textDraw(posx, posy, content);
-            truetype.end();
-        } break;
-        case 3: {
-            // vlw bitmap font
-            spr.setTextDatum(align);
-            if (font != "") spr.loadFont(font.substring(1), *contentFS);
-            spr.setTextColor(color, bgcolor);
-            spr.setTextWrap(false, false);
-            spr.drawString(content, posx, posy);
-            if (font != "") spr.unloadFont();
         }
     }
 }

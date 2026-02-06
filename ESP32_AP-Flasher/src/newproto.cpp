@@ -503,15 +503,16 @@ void processXferTimeout(struct espXferComplete* xfc, bool local) {
 
     time_t now;
     time(&now);
+    dequeueItem(xfc->src);
     tagRecord* taginfo = tagRecord::findByMAC(xfc->src);
     if (taginfo != nullptr) {
         taginfo->pendingIdle = 60;
+        taginfo->pendingCount = countQueueItem(xfc->src);
         clearPending(taginfo);
     }
-    while (dequeueItem(xfc->src)) {
-    };
 
-    checkQueue(xfc->src);
+    // more in the queue?
+    if (local) checkQueue(xfc->src);
 
     wsSendTaginfo(xfc->src, SYNC_TAGSTATUS);
     if (local) udpsync.netProcessXferTimeout(xfc);

@@ -2,9 +2,11 @@
 
 #include <Preferences.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
 #include <esp_wifi.h>
 
 #include <ETH.h>
+#include <SPI.h> 
 
 #include "newproto.h"
 #include "system.h"
@@ -19,6 +21,12 @@ uint8_t x_buffer[100];
 uint8_t x_position = 0;
 
 #if defined(ETHERNET_PHY_POWER) && defined(ETHERNET_PHY_MDC) && defined(ETHERNET_PHY_MDIO) && defined(ETHERNET_PHY_TYPE) && defined(ETHERNET_CLK_MODE)
+static bool eth_init = false;
+static bool eth_connected = false;
+static bool eth_ip_ok = false;
+static long eth_timeout = 0;
+#endif
+#if defined(HAS_W5500)
 static bool eth_init = false;
 static bool eth_connected = false;
 static bool eth_ip_ok = false;
@@ -68,6 +76,22 @@ void WifiManager::poll() {
         connectToWifi();
     }
 
+#endif
+#if defined(HAS_W5500)
+    // Check physical link status
+    bool linkStatus = ETH.linkUp();
+
+    if (linkStatus && !eth_connected) {
+        terminalLog("Ethernet cable connected.");
+        eth_connected = true;
+        wifiStatus = ETHERNET;
+    } else if (!linkStatus && eth_connected) {
+        terminalLog("Ethernet cable disconnected.");
+        eth_connected = false;
+        wifiStatus = NOINIT;
+        // Fallback to WiFi
+        connectToWifi();
+    }
 #endif
 
     if (wifiStatus == AP && millis() > _nextReconnectCheck && _ssid != "") {
@@ -151,6 +175,40 @@ void WifiManager::initEth() {
             ETHERNET_PHY_TYPE,
             ETHERNET_CLK_MODE,
             false);
+    }
+#endif
+#if defined(HAS_W5500) // W5500
+    if(!eth_init) {
+        eth_init = true;
+
+        Serial.println("W5500 Ethernet Not supported yet");
+        logLine("W5500 Ethernet Not supported yet");
+
+        // NOTE:
+        // W5500 + ETH.h requires Arduino-ESP32 3.x (ESP-IDF 5.x).
+        // PlatformIO espressif32 6.x is stuck on Arduino 2.x,
+        // so this will fail until PlatformIO updates.
+        // at which point uncomment the below and it should work.
+        /*
+        bool success = ETH.begin(
+            ETH_PHY_W5500,
+            1,                 // phy_addr (ignored for W5500, but required)
+            ETH_SPI_CS,
+            ETH_PHY_INTR,
+            ETH_PHY_RST,
+            SPI2_HOST,
+            ETH_SPI_SCK,
+            ETH_SPI_MISO,
+            ETH_SPI_MOSI
+        );
+        
+        if (success) {
+            Serial.println("W5500 Ethernet Started");
+            logLine("W5500 Ethernet Started");
+        } else {
+            Serial.println("W5500 Ethernet Failed to Start");
+            logLine("W5500 Ethernet Failed to Start");
+        }*/
     }
 #endif
 }
@@ -413,19 +471,57 @@ void WifiManager::WiFiEvent(WiFiEvent_t event) {
             break;
 
 #endif
+#if defined(HAS_W5500)
+
+        case ARDUINO_EVENT_ETH_START:
+            eventname = "ETH (W5500) Started";
+            ETH.setHostname(buildHostname(ESP_MAC_ETH).c_str());
+            eth_timeout = 0;
+            break;
+        case ARDUINO_EVENT_ETH_CONNECTED:
+            eventname = "ETH Connected";
+            // Disable WiFi to save power and avoid routing conflicts
+            WiFi.mode(WIFI_MODE_NULL); 
+            WiFi.disconnect();
+            eth_connected = true;
+            eth_timeout = millis();
+            break;
+        case ARDUINO_EVENT_ETH_GOT_IP:
+            // W5500 is typically 10/100Mbps
+            eventname = "ETH MAC: " + ETH.macAddress() + 
+                        ", IPv4: " + ETH.localIP().toString() + 
+                        ", " + (ETH.fullDuplex() ? "FULL_DUPLEX, " : "HALF_DUPLEX, ") + 
+                        ETH.linkSpeed() + "Mbps";
+            eth_ip_ok = true;
+            init_udp(); // Start your UDP services on the new ETH interface
+            eth_timeout = 0;
+            break;
+        case ARDUINO_EVENT_ETH_DISCONNECTED:
+            eventname = "ETH Disconnected";
+            eth_connected = false;
+            eth_ip_ok = false;
+            eth_timeout = 0;
+            break;
+        case ARDUINO_EVENT_ETH_STOP:
+            eventname = "ETH Stopped";
+            eth_connected = false;
+            eth_ip_ok = false;
+            break;
+
+#endif
 
         default:
             break;
     }
     if (eventname) terminalLog(eventname);
-    // logLine("WiFi event [" + String(event) + "]: " + eventname);
+    //if (eventname) logLine("WiFi event [" + String(event) + "]: " + eventname);
 }
 
 // *** Improv
 // https :  // github.com/jnthas/improv-wifi-demo
 
 #define STR_IMPL(x) #x
-#define STR(x) STR_IMPL(x)
+#define _STR(x) STR_IMPL(x)
 
 #ifndef BUILD_ENV_NAME
 #define BUILD_ENV_NAME unknown
@@ -494,9 +590,9 @@ bool onCommandCallback(improv::ImprovCommand cmd) {
                 // Firmware name
                 "OpenEPaperLink",
                 // Firmware version
-                STR(BUILD_VERSION),
+                _STR(BUILD_VERSION),
                 // Hardware chip/variant
-                STR(BUILD_ENV_NAME),
+                _STR(BUILD_ENV_NAME),
                 // Device name
                 "Access Point"};
             std::vector<uint8_t> data = improv::build_rpc_response(improv::GET_DEVICE_INFO, infos, false);

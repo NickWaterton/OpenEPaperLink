@@ -30,18 +30,19 @@
 #define SHA 0
 #endif
 
+// Change STR to something unique like _STR due to conflict
 #define STR_IMPL(x) #x
-#define STR(x) STR_IMPL(x)
+#define _STR(x) STR_IMPL(x)
 #define LOG(format, ... ) Serial.printf(format,## __VA_ARGS__)
 
 
 void handleSysinfoRequest(AsyncWebServerRequest* request) {
     JsonDocument doc;
     doc["alias"] = config.alias;
-    doc["env"] = STR(BUILD_ENV_NAME);
-    doc["buildtime"] = STR(BUILD_TIME);
-    doc["buildversion"] = STR(BUILD_VERSION);
-    doc["sha"] = STR(SHA);
+    doc["env"] = _STR(BUILD_ENV_NAME);
+    doc["buildtime"] = _STR(BUILD_TIME);
+    doc["buildversion"] = _STR(BUILD_VERSION);
+    doc["sha"] = _STR(SHA);
     doc["psramsize"] = ESP.getPsramSize();
     doc["flashsize"] = ESP.getFlashChipSize();
     doc["rollback"] = Update.canRollBack();

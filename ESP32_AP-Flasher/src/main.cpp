@@ -122,6 +122,7 @@ void setup() {
     }
     */
 
+
     wm.initEth();
     initAPconfig();
 
@@ -151,7 +152,8 @@ void setup() {
 
 #ifdef HAS_BLE_WRITER
     if (config.ble) {
-        xTaskCreate(BLETask, "BLE Writer", 12000, NULL, 5, NULL);
+        //xTaskCreate(BLETask, "BLE Writer", 12000, NULL, 5, NULL);
+        xTaskCreatePinnedToCore(BLETask, "BLE Writer", 12000, NULL, 5, NULL, 1);
     }
 #endif
 

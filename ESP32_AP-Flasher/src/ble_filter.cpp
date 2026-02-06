@@ -2,7 +2,7 @@
 #include <Arduino.h>
 #include <FS.h>
 
-#include "BLEDevice.h"
+#include <NimBLEDevice.h>
 #include "newproto.h"
 #include "serialap.h"
 #include "settings.h"
@@ -84,47 +84,89 @@ struct BleAdvDataStructV2 {
     uint8_t counter;
 } __packed;
 
-bool BLE_filter_add_device(BLEAdvertisedDevice advertisedDevice) {
+bool FilterMac(NimBLEAddress currentAddr, bool add=false) {
+    // Filter out unwanted addresses
+    // 1. Static vector persists between function calls
+    static std::vector<NimBLEAddress> ignoreMacs;
+    static uint32_t lastPrint = 0;
+    // 2. Initial Reserve: Prevents memory fragmentation by pre-allocating space
+    static bool initialized = false;
+    if (!initialized) {
+        ignoreMacs.reserve(50); // Pre-allocate for 50 devices (~350B)
+        initialized = true;
+    }
+    // 3. Reject Random/Private addresses immediately
+    if (!currentAddr.isPublic()) {
+        return false; 
+    }
+    // 4. Search for the address and reject if found
+    if (std::find(ignoreMacs.begin(), ignoreMacs.end(), currentAddr) != ignoreMacs.end()) {
+        return false;
+    }
+    // 5. Threshold Management: Clear list if it gets too large
+    // This prevents "Memory Leaks" in long-running scans
+    if (ignoreMacs.size() >= 100) {
+        ignoreMacs.clear(); 
+        ignoreMacs.shrink_to_fit(); // Free RAM
+        Serial.println("Filter reset: list exceeded 100 public devices.");
+    }
+    // add new address if add flag is set
+    if (add) {
+        ignoreMacs.push_back(currentAddr);
+        return false;
+    }
+    // print filter stats every 5 seconds
+    if (millis() - lastPrint > 5000) {
+        Serial.printf("Filter Stats - Size: %d, Capacity: %d\r\n", 
+                      ignoreMacs.size(), ignoreMacs.capacity());
+        lastPrint = millis();
+    }
+    return true;
+}
+
+bool BLE_filter_add_device(NimBLEAdvertisedDevice& advertisedDevice) {
+    NimBLEAddress currentAddr = advertisedDevice.getAddress();
+    if (!FilterMac(currentAddr)) {
+        return false;
+    }
     Serial.print("BLE Advertised Device found: ");
     Serial.println(advertisedDevice.toString().c_str());
 
     uint8_t payloadData[100];
-    int payloadDatalen = advertisedDevice.getPayloadLength();
-    memcpy(&payloadData, (uint8_t*)advertisedDevice.getPayload(), payloadDatalen);
+    auto payload = advertisedDevice.getPayload(); // This is a std::vector
+    int payloadDatalen = payload.size();
+    memcpy(payloadData, payload.data(), payloadDatalen);
     Serial.printf(" Payload data: ");
     for (int i = 0; i < payloadDatalen; i++)
         Serial.printf("%02X", payloadData[i]);
     Serial.printf("\r\n");
 
     if (advertisedDevice.haveManufacturerData()) {
-        int manuDatalen = advertisedDevice.getManufacturerData().length();
         uint8_t manuData[100];
-        if (manuDatalen > sizeof(manuData))
+        std::string mData = advertisedDevice.getManufacturerData();
+        int manuDatalen = mData.length();
+        if (manuDatalen > 0 && manuDatalen <= 100) {
+            memcpy(manuData, (const uint8_t*)mData.data(), manuDatalen);
+        } else {
             return false;  // Manu data too big, could never happen but better make sure here
-#if ESP_ARDUINO_VERSION_MAJOR == 2
-        memcpy(&manuData, (uint8_t*)advertisedDevice.getManufacturerData().data(), manuDatalen);
-#else
-        // [Nic] suggested fix for arduino 3.x by copilot, but I cannot test it
-        memcpy(&manuData, (uint8_t*)advertisedDevice.getManufacturerData().c_str(), manuDatalen);
-#endif
+        }
         Serial.printf(" Address type: %02X Manu data: ", advertisedDevice.getAddressType());
-        for (int i = 0; i < advertisedDevice.getManufacturerData().length(); i++)
+        for (int i = 0; i < manuDatalen; i++)
             Serial.printf("%02X", manuData[i]);
         Serial.printf("\r\n");
         if (manuDatalen == 7 && manuData[0] == 0x53 && manuData[1] == 0x50) {  // Lets check for a Gicisky E-Paper display
-
             struct espAvailDataReq theAdvData;
             memset((uint8_t*)&theAdvData, 0x00, sizeof(espAvailDataReq));
 
             uint8_t macReversed[6];
-            memcpy(&macReversed, (uint8_t*)advertisedDevice.getAddress().getNative(), 6);
-            theAdvData.src[0] = macReversed[5];
-            theAdvData.src[1] = macReversed[4];
-            theAdvData.src[2] = macReversed[3];
-            theAdvData.src[3] = macReversed[2];
-            theAdvData.src[4] = macReversed[1];
-            theAdvData.src[5] = macReversed[0];
-            theAdvData.src[6] = manuData[2];  // We use this do find out what type of display we got for compression^^
+             memcpy(&macReversed, (uint8_t*)currentAddr.getVal(), 6);
+            theAdvData.src[0] = macReversed[0];
+            theAdvData.src[1] = macReversed[1];
+            theAdvData.src[2] = macReversed[2];
+            theAdvData.src[3] = macReversed[3];
+            theAdvData.src[4] = macReversed[4];
+            theAdvData.src[5] = macReversed[5];
+            theAdvData.src[6] = manuData[2];  // We use this to find out what type of display we got for compression
             theAdvData.src[7] = manuData[6];
             theAdvData.adr.batteryMv = manuData[3] * 100;
             theAdvData.adr.lastPacketRSSI = advertisedDevice.getRSSI();
@@ -194,14 +236,14 @@ bool BLE_filter_add_device(BLEAdvertisedDevice advertisedDevice) {
                     break;
             }
             uint8_t macReversed[6];
-            memcpy(&macReversed, (uint8_t*)advertisedDevice.getAddress().getNative(), 6);
-            theAdvData.src[0] = macReversed[5];
-            theAdvData.src[1] = macReversed[4];
-            theAdvData.src[2] = macReversed[3];
-            theAdvData.src[3] = macReversed[2];
-            theAdvData.src[4] = macReversed[1];
-            theAdvData.src[5] = macReversed[0];
-            theAdvData.src[6] = manuData[0];  // We use this do find out what type of display we got for compression^^
+            memcpy(&macReversed, (uint8_t*)currentAddr.getVal(), 6);
+            theAdvData.src[0] = macReversed[0];
+            theAdvData.src[1] = macReversed[1];
+            theAdvData.src[2] = macReversed[2];
+            theAdvData.src[3] = macReversed[3];
+            theAdvData.src[4] = macReversed[4];
+            theAdvData.src[5] = macReversed[5];
+            theAdvData.src[6] = manuData[0];  // We use this to find out what type of display we got for compression
             theAdvData.src[7] = manuData[1];
             processDataReq(&theAdvData, true);
             return true;
@@ -209,17 +251,17 @@ bool BLE_filter_add_device(BLEAdvertisedDevice advertisedDevice) {
     }
     if (payloadDatalen >= 17) {  // Lets check for an ATC Mi Thermometer
         uint8_t macReversed[6];
-        memcpy(&macReversed, (uint8_t*)advertisedDevice.getAddress().getNative(), 6);
-        if (payloadData[9] == macReversed[5] && payloadData[8] == macReversed[4] && payloadData[7] == macReversed[3]) {  // Here we found an ATC Mi Thermometer
+        memcpy(&macReversed, (uint8_t*)currentAddr.getVal(), 6);
+        if (payloadData[9] == macReversed[0] && payloadData[8] == macReversed[1] && payloadData[7] == macReversed[2]) {  // Here we found an ATC Mi Thermometer
             struct espAvailDataReq theAdvData;
             memset((uint8_t*)&theAdvData, 0x00, sizeof(espAvailDataReq));
 
-            theAdvData.src[0] = macReversed[5];
-            theAdvData.src[1] = macReversed[4];
-            theAdvData.src[2] = macReversed[3];
-            theAdvData.src[3] = macReversed[2];
-            theAdvData.src[4] = macReversed[1];
-            theAdvData.src[5] = macReversed[0];
+            theAdvData.src[0] = macReversed[0];
+            theAdvData.src[1] = macReversed[1];
+            theAdvData.src[2] = macReversed[2];
+            theAdvData.src[3] = macReversed[3];
+            theAdvData.src[4] = macReversed[4];
+            theAdvData.src[5] = macReversed[5];
             theAdvData.src[6] = 0x00;
             theAdvData.src[7] = 0x00;
             theAdvData.adr.batteryMv = payloadData[14] << 8 | payloadData[15];
@@ -234,6 +276,7 @@ bool BLE_filter_add_device(BLEAdvertisedDevice advertisedDevice) {
             return true;
         }
     }
+    FilterMac(currentAddr, true);
     return false;
 }
 
@@ -497,7 +540,7 @@ uint32_t get_ATC_BLE_OEPL_image(uint8_t address[8], uint8_t* buffer, uint32_t ma
         file.close();
     }
     if (queueItem->len > max_len) {
-        Serial.print("The upload is too big better cencel it\r\n");
+        Serial.print("The upload is too big better cancel it\r\n");
         prepareCancelPending(address);
         return 0;
     }
