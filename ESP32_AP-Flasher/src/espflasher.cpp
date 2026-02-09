@@ -2,6 +2,7 @@
 #include <ArduinoJson.h>
 #include <FS.h>
 #include <HTTPClient.h>
+#include <Client.h>
 #include <esp_loader.h>
 
 #include "esp32_port.h"
@@ -154,7 +155,7 @@ bool downloadAndWriteBinary(String &filename, const char *url) {
             break;
         }
         wsSerial("downloading " + String(filename));
-        WiFiClient *stream = binaryHttp.getStreamPtr();
+        Client *stream = binaryHttp.getStreamPtr();
         uint8_t buffer[1024];
         size_t totalBytesRead = 0;
      // timeout if we don't average at least 1k bytes/second

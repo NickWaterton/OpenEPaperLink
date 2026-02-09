@@ -10,6 +10,9 @@
 #define WIFI_MANAGER_H
 
 #include <WiFi.h>
+#ifndef esp_mac_type_t
+#include <esp_mac.h>
+#endif
 
 enum WifiStatus {
     NOINIT,
@@ -54,7 +57,11 @@ class WifiManager {
 
     void startManagementServer();
     void poll();
+#if ESP_IDF_VERSION_MAJOR >= 5
+    void WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info);
+#else
     static void WiFiEvent(WiFiEvent_t event);
+#endif
     void initEth();
     IPAddress localIP();
 };
@@ -131,3 +138,4 @@ void set_error(improv::Error error);
 void getAvailableWifiNetworks();
 bool onCommandCallback(improv::ImprovCommand cmd);
 void onErrorCallback(improv::Error err);
+String getActiveMacAddress();

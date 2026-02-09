@@ -16,6 +16,8 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
+#include <esp_mac.h>
 #include <HTTPClient.h>
 #include <MD5Builder.h>
 #include <locale.h>
@@ -56,7 +58,8 @@ void contentRunner() {
     time_t now;
     time(&now);
     uint8_t wifimac[8];
-    WiFi.macAddress(wifimac);
+    //WiFi.macAddress(wifimac);
+    esp_read_mac(wifimac, ESP_MAC_WIFI_STA);
     memset(&wifimac[6], 0, 2);
 
     for (tagRecord *taginfo : tagDB) {
@@ -168,7 +171,8 @@ void drawNew(const uint8_t mac[8], tagRecord *&taginfo) {
     }
 
     uint8_t wifimac[8];
-    WiFi.macAddress(wifimac);
+    //WiFi.macAddress(wifimac);
+    esp_read_mac(wifimac, ESP_MAC_WIFI_STA);
     memset(&wifimac[6], 0, 2);
 
     const bool isAp = memcmp(mac, wifimac, 8) == 0;

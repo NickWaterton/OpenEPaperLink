@@ -4,6 +4,10 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <esp_wifi.h>
+#include <esp_idf_version.h>
+#ifndef esp_mac_type_t
+#include <esp_mac.h>
+#endif
 
 #include <ETH.h>
 #include <SPI.h> 
@@ -45,11 +49,16 @@ WifiManager::WifiManager() {
     _APstarted = false;
     wifiStatus = NOINIT;
 
+#if ESP_IDF_VERSION_MAJOR >= 5
+    // Arduino 3.x style
+    //moved to after WiFi.begin()
+#else
     WiFi.onEvent(WiFiEvent);
     WiFiEventId_t eventID = WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
         Serial.print("WiFi lost connection. Reason: ");
         Serial.println(info.wifi_sta_disconnected.reason);
     }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+#endif
 }
 
 void WifiManager::terminalLog(String text) {
@@ -78,19 +87,32 @@ void WifiManager::poll() {
 
 #endif
 #if defined(HAS_W5500)
+    static bool wifi_disabled_for_eth = false;
     // Check physical link status
     bool linkStatus = ETH.linkUp();
 
-    if (linkStatus && !eth_connected) {
-        terminalLog("Ethernet cable connected.");
-        eth_connected = true;
-        wifiStatus = ETHERNET;
-    } else if (!linkStatus && eth_connected) {
-        terminalLog("Ethernet cable disconnected.");
-        eth_connected = false;
-        wifiStatus = NOINIT;
-        // Fallback to WiFi
-        connectToWifi();
+    if (linkStatus && eth_connected) {
+        // Disable WiFi cleanly (once)
+        if (!wifi_disabled_for_eth) {
+            terminalLog("Ethernet cable connected.");
+            wifiStatus = ETHERNET;
+            Serial.println("Disabling WiFi due to Ethernet");
+            ETH.setHostname(buildHostname(ESP_MAC_ETH).c_str());
+            WiFi.disconnect(true);
+            vTaskDelay(50 / portTICK_PERIOD_MS); 
+            WiFi.mode(WIFI_MODE_NULL);
+            init_udp(); // Start your UDP services on the new ETH interface
+            wifi_disabled_for_eth = true;
+        }
+    } else if (!linkStatus && !eth_connected) {
+        if (wifi_disabled_for_eth) {
+            terminalLog("Ethernet cable disconnected.");
+            wifiStatus = NOINIT;
+            wifi_disabled_for_eth = false;
+            // Re-enable WiFi
+            Serial.println("Re-enabling WiFi");
+            connectToWifi();
+        }
     }
 #endif
 
@@ -177,19 +199,13 @@ void WifiManager::initEth() {
             false);
     }
 #endif
-#if defined(HAS_W5500) // W5500
+#if defined(HAS_W5500) && ESP_IDF_VERSION_MAJOR >= 5 // W5500 on Arduino 3.x only
     if(!eth_init) {
         eth_init = true;
 
-        Serial.println("W5500 Ethernet Not supported yet");
-        logLine("W5500 Ethernet Not supported yet");
-
         // NOTE:
         // W5500 + ETH.h requires Arduino-ESP32 3.x (ESP-IDF 5.x).
-        // PlatformIO espressif32 6.x is stuck on Arduino 2.x,
-        // so this will fail until PlatformIO updates.
-        // at which point uncomment the below and it should work.
-        /*
+        
         bool success = ETH.begin(
             ETH_PHY_W5500,
             1,                 // phy_addr (ignored for W5500, but required)
@@ -208,13 +224,21 @@ void WifiManager::initEth() {
         } else {
             Serial.println("W5500 Ethernet Failed to Start");
             logLine("W5500 Ethernet Failed to Start");
-        }*/
+        }
     }
+#elif defined(HAS_W5500)
+    // Arduino 2.x fallback
+    Serial.println("W5500 Ethernet requires Arduino-ESP32 3.x");
+    logLine("W5500 Ethernet requires Arduino-ESP32 3.x");
 #endif
 }
 
 bool WifiManager::connectToWifi() {
 #if defined(ETHERNET_PHY_POWER) && defined(ETHERNET_PHY_MDC) && defined(ETHERNET_PHY_MDIO) && defined(ETHERNET_PHY_TYPE) && defined(ETHERNET_CLK_MODE)
+    if (wifiStatus == ETHERNET || eth_connected)
+        return true;
+#endif
+#if defined(HAS_W5500)
     if (wifiStatus == ETHERNET || eth_connected)
         return true;
 #endif
@@ -254,6 +278,10 @@ bool WifiManager::connectToWifi(String ssid, String pass, bool savewhensuccessfu
     if (wifiStatus == ETHERNET)
         return true;
 #endif
+#if defined(HAS_W5500)
+    if (wifiStatus == ETHERNET)
+        return true;
+#endif
 
     _ssid = ssid;
     _pass = pass;
@@ -261,23 +289,40 @@ bool WifiManager::connectToWifi(String ssid, String pass, bool savewhensuccessfu
 
     _APstarted = false;
     WiFi.disconnect(true, true);
-    delay(100);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
     WiFi.mode(WIFI_MODE_NULL);
-    delay(100);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
     WiFi.setHostname(buildHostname(ESP_MAC_WIFI_STA).c_str());
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(WIFI_PS_MIN_MODEM);
-
+    WiFi.persistent(savewhensuccessfull);
     terminalLog("Connecting to WiFi...");
     // logLine("Connecting to WiFi...");
-    WiFi.persistent(savewhensuccessfull);
     WiFi.begin(_ssid.c_str(), _pass.c_str());
+#if ESP_IDF_VERSION_MAJOR >= 5
+    // Arduino 3.x style
+    static bool first_connect_to_wifi = true;
+    if (first_connect_to_wifi) {
+        WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info){
+            this->WiFiEvent(event, info);
+        });
+        WiFiEventId_t eventID = WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info) {
+            Serial.print("WiFi lost connection. Reason: ");
+            Serial.println(info.wifi_sta_disconnected.reason);
+        }, WiFiEvent_t::ARDUINO_EVENT_WIFI_STA_DISCONNECTED);
+        first_connect_to_wifi = false;
+    }
+#endif
     _connected = waitForConnection();
     return _connected;
 }
 
 bool WifiManager::waitForConnection() {
 #if defined(ETHERNET_PHY_POWER) && defined(ETHERNET_PHY_MDC) && defined(ETHERNET_PHY_MDIO) && defined(ETHERNET_PHY_TYPE) && defined(ETHERNET_CLK_MODE)
+    if (wifiStatus == ETHERNET)
+        return true;
+#endif
+#if defined(HAS_W5500)
     if (wifiStatus == ETHERNET)
         return true;
 #endif
@@ -392,7 +437,12 @@ void WifiManager::pollSerial() {
     }
 }
 
+#if ESP_IDF_VERSION_MAJOR >= 5
+void WifiManager::WiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
+#else
 void WifiManager::WiFiEvent(WiFiEvent_t event) {
+#endif
+    // Do NOT modify WiFi state in this callback - it will cause memory errors and reboots. Set a flag and make the change in poll instead
     Serial.printf("[WiFi-event %d] ", event);
     String eventname="";
 
@@ -475,25 +525,21 @@ void WifiManager::WiFiEvent(WiFiEvent_t event) {
 
         case ARDUINO_EVENT_ETH_START:
             eventname = "ETH (W5500) Started";
-            ETH.setHostname(buildHostname(ESP_MAC_ETH).c_str());
             eth_timeout = 0;
             break;
         case ARDUINO_EVENT_ETH_CONNECTED:
             eventname = "ETH Connected";
-            // Disable WiFi to save power and avoid routing conflicts
-            WiFi.mode(WIFI_MODE_NULL); 
-            WiFi.disconnect();
-            eth_connected = true;
             eth_timeout = millis();
             break;
         case ARDUINO_EVENT_ETH_GOT_IP:
             // W5500 is typically 10/100Mbps
-            eventname = "ETH MAC: " + ETH.macAddress() + 
-                        ", IPv4: " + ETH.localIP().toString() + 
-                        ", " + (ETH.fullDuplex() ? "FULL_DUPLEX, " : "HALF_DUPLEX, ") + 
-                        ETH.linkSpeed() + "Mbps";
+             if (ETH.fullDuplex()) {
+                eventname = "ETH MAC: " + ETH.macAddress() + ", IPv4: " + ETH.localIP().toString() + ", FULL_DUPLEX, " + ETH.linkSpeed() + "Mbps";
+            } else {
+                eventname = "ETH MAC: " + ETH.macAddress() + ", IPv4: " + ETH.localIP().toString() + ", " + ETH.linkSpeed() + "Mbps";
+            }
             eth_ip_ok = true;
-            init_udp(); // Start your UDP services on the new ETH interface
+            eth_connected = true;
             eth_timeout = 0;
             break;
         case ARDUINO_EVENT_ETH_DISCONNECTED:
@@ -506,6 +552,7 @@ void WifiManager::WiFiEvent(WiFiEvent_t event) {
             eventname = "ETH Stopped";
             eth_connected = false;
             eth_ip_ok = false;
+            eth_timeout = 0;
             break;
 
 #endif
@@ -535,6 +582,21 @@ void WifiManager::WiFiEvent(WiFiEvent_t event) {
 
 std::vector<std::string> getLocalUrl() {
     return {String("http://" + WiFi.localIP().toString()).c_str()};
+}
+
+String getActiveMacAddress() {
+#if defined(HAS_W5500)
+    if (eth_connected) {
+        uint8_t mac[6];
+        esp_read_mac(mac, ESP_MAC_ETH);
+        char buf[25];
+        sprintf(buf, "(ETH) %02X:%02X:%02X:%02X:%02X:%02X",
+                mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+        return String(buf);
+    }
+#endif
+    // Fallback to WiFi STA MAC
+    return WiFi.macAddress();
 }
 
 void onErrorCallback(improv::Error err) {

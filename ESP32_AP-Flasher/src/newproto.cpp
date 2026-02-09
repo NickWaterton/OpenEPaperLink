@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <MD5Builder.h>
 #include <time.h>
+#include <Client.h>
 
 #include <algorithm>
 #include <cstring>
@@ -356,7 +357,8 @@ void prepareExternalDataAvail(struct pendingData* pending, IPAddress remoteIP) {
                     if (len > 0) {
                         clearPending(taginfo);
                         taginfo->data = new uint8_t[len];
-                        WiFiClient* stream = http.getStreamPtr();
+                        //WiFiClient* stream = http.getStreamPtr();
+                        Client* stream = http.getStreamPtr();
                         stream->readBytes(taginfo->data, len);
                         taginfo->dataType = pending->availdatainfo.dataType;
                         taginfo->pendingCount++;
