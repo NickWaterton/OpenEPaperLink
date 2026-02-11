@@ -20,10 +20,17 @@ DynStorage::DynStorage() : isInited(0) {}
 
 SemaphoreHandle_t fsMutex = NULL;
 
+static bool littlefs_init_done = false;
+
 #ifndef SD_CARD_ONLY
 static void initLittleFS() {
-    LittleFS.begin();
-    contentFS = &LittleFS;
+static bool littlefs_init_done = false;
+    if (!littlefs_init_done) {
+        LittleFS.begin();
+        Serial.println("LittleFS started");
+        contentFS = &LittleFS;
+        littlefs_init_done = true;
+    }
 }
 #endif
 
@@ -86,7 +93,7 @@ static void initSDCard() {
         Serial.println("No SD card attached");
         return;
     }
-
+    Serial.println("SD Card Mounted");
     contentFS = &SD;
 }
 #endif
@@ -95,7 +102,9 @@ static void initSDCard() {
 uint64_t DynStorage::freeSpace(){
     this->begin();
 #ifdef HAS_SDCARD
-    if (SDCARD.cardType() != CARD_NONE) {
+    if (contentFS == &LittleFS) {
+        return LittleFS.totalBytes() - LittleFS.usedBytes();
+    } else if (SDCARD.cardType() != CARD_NONE) {
         return SDCARD.totalBytes() - SDCARD.usedBytes();
     }
     // fall back to LittleFS
