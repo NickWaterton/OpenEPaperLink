@@ -136,6 +136,7 @@ void saveDB(const String& filename) {
         existingFile.close();
         vTaskDelay(pdMS_TO_TICKS(100));
         String backupFilename = filename + ".bak";
+        contentFS->remove(backupFilename);
         if (!contentFS->rename(filename.c_str(), backupFilename.c_str())) {
             xSemaphoreGive(fsMutex);
             logLine("error renaming tagDB to .bak");
