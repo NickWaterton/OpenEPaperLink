@@ -102,13 +102,20 @@ static void initSDCard() {
 uint64_t DynStorage::freeSpace(){
     this->begin();
 #ifdef HAS_SDCARD
+#ifndef SD_CARD_ONLY
     if (contentFS == &LittleFS) {
         return LittleFS.totalBytes() - LittleFS.usedBytes();
-    } else if (SDCARD.cardType() != CARD_NONE) {
+    } else
+#endif
+    if (SDCARD.cardType() != CARD_NONE) {
         return SDCARD.totalBytes() - SDCARD.usedBytes();
     }
+#ifndef SD_CARD_ONLY
     // fall back to LittleFS
     return LittleFS.totalBytes() - LittleFS.usedBytes();
+#else
+    return 0;
+#endif
 #endif
 #ifndef SD_CARD_ONLY
     return LittleFS.totalBytes() - LittleFS.usedBytes();
