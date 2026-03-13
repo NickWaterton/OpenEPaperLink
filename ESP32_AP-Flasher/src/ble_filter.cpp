@@ -594,17 +594,17 @@ uint32_t compress_image(uint8_t address[8], uint8_t* buffer, uint32_t max_len) {
 //   BW=0, Color=1 → YELLOW (0b10)
 //   BW=1, Color=1 → RED    (0b11)
 
-struct WolinkDisplayInfo { uint16_t width; uint16_t height; };
+struct WolinkDisplayInfo { uint16_t width; uint16_t height; uint16_t voffset; };
 
 static WolinkDisplayInfo getWolinkDisplayInfo(uint8_t hwType) {
     switch (hwType) {
-        case WOLINK_BLE_154_BWRY:  return {200, 200};
-        case WOLINK_BLE_213_BWRY:  return {250, 128};
-        case WOLINK_BLE_213V_BWRY: return {250, 128};
-        case WOLINK_BLE_29_BWRY:   return {296, 128};
-        case WOLINK_BLE_42_BWRY:   return {400, 300};
-        case WOLINK_BLE_58_BWRY:   return {648, 480};
-        default:                    return {250, 128};
+        case WOLINK_BLE_154_BWRY:  return {200, 200, 0};
+        case WOLINK_BLE_213_BWRY:  return {250, 128, 0};
+        case WOLINK_BLE_213V_BWRY: return {250, 122, 6};  // 128-row buffer, top 6 rows hidden
+        case WOLINK_BLE_29_BWRY:   return {296, 128, 0};
+        case WOLINK_BLE_42_BWRY:   return {400, 300, 0};
+        case WOLINK_BLE_58_BWRY:   return {648, 480, 0};
+        default:                    return {250, 128, 0};
     }
 }
 
@@ -636,14 +636,15 @@ uint32_t wolink_encode_image(uint8_t address[8], uint8_t* buffer, uint32_t max_l
     }
 
     WolinkDisplayInfo disp = getWolinkDisplayInfo(taginfo->hwType);
-    uint16_t width  = disp.width;
-    uint16_t height = disp.height;
+    uint16_t width      = disp.width;
+    uint16_t height     = disp.height;
+    uint16_t buf_height = height + disp.voffset;  // physical buffer rows (e.g. 128 even if visible is 122)
 
     // plane_size: bytes for one 1bpp plane, packed without row alignment
     uint32_t plane_size   = ((uint32_t)width * height + 7) / 8;
     bool     has_color    = (queueItem->len >= plane_size * 2);
-    // Wolink: 2bpp column-major, 32 bytes per column for 128-tall display
-    uint32_t bytes_per_col = ((uint32_t)height * 2 + 7) / 8;  // = height / 4 when height%4==0
+    // Wolink: 2bpp column-major, buf_height rows per column
+    uint32_t bytes_per_col = ((uint32_t)buf_height * 2 + 7) / 8;  // = buf_height / 4 when buf_height%4==0
     uint32_t out_size      = (uint32_t)width * bytes_per_col;
 
     Serial.printf("Wolink encode: %dx%d, plane=%d bytes, out=%d bytes, has_color=%d\r\n",
@@ -670,7 +671,7 @@ uint32_t wolink_encode_image(uint8_t address[8], uint8_t* buffer, uint32_t max_l
 
             // Wolink 2bpp: (color_bit << 1) | bw_bit
             uint8_t  color     = (color_bit << 1) | bw_bit;
-            uint16_t phy_y     = (height - 1) - y;           // y-flip
+            uint16_t phy_y     = (height - 1) - y;             // y-flip into visible range [0, height-1]
             uint32_t dst_byte  = (uint32_t)x * bytes_per_col + phy_y / 4;
             uint8_t  dst_shift = 6 - (phy_y % 4) * 2;       // 2bpp MSB-first per 4-pixel group
 

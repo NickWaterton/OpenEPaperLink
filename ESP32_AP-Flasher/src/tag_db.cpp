@@ -460,7 +460,7 @@ HwType getHwType(const uint8_t id) {
             switch (id) {
                 case WOLINK_BLE_154_BWRY:  hwType.width = 200; hwType.height = 200; break;
                 case WOLINK_BLE_213_BWRY:  hwType.width = 250; hwType.height = 128; break;
-                case WOLINK_BLE_213V_BWRY: hwType.width = 250; hwType.height = 128; break;
+                case WOLINK_BLE_213V_BWRY: hwType.width = 250; hwType.height = 122; break;
                 case WOLINK_BLE_29_BWRY:   hwType.width = 296; hwType.height = 128; break;
                 case WOLINK_BLE_42_BWRY:   hwType.width = 400; hwType.height = 300; break;
                 case WOLINK_BLE_58_BWRY:   hwType.width = 648; hwType.height = 480; break;

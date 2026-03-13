@@ -1,8 +1,8 @@
 {
 	"version": 5,
-	"name": "Wolink BLE BWRY 2.13\" (PID 0x000E)",
+	"name": "Wolink BLE BWRY 2.13\" v2",
 	"width": 250,
-	"height": 128,
+	"height": 122,
 	"rotatebuffer": 0,
 	"bpp": 2,
 	"colortable": {
