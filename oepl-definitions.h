@@ -88,6 +88,17 @@
 #define STYPE_SIZE_097 0x64
 #define STYPE_SIZE_013 0x4D
 
+// Wolink / Zhsunyco BLE BWRY ESL Types (manufacturer ID 0xBBEA)
+// 2bpp column-major y-flipped image format (8000 bytes for 250x128)
+// Auth: AES-128-CBC, key 9B609F28BC49E25729BD7B8DF22B4420, zero IV
+#define WOLINK_BLE_154_BWRY  0xD0   // 1.54"  200x200
+#define WOLINK_BLE_213_BWRY  0xD1   // 2.13"  250x128
+#define WOLINK_BLE_213V_BWRY 0xD2   // 2.13"  250x122 (voffset=6)
+#define WOLINK_BLE_29_BWRY   0xD3   // 2.9"   296x128
+#define WOLINK_BLE_42_BWRY   0xD4   // 4.2"   400x300
+#define WOLINK_BLE_58_BWRY   0xD5   // 5.8"   648x480
+#define WOLINK_BLE_UNKNOWN   0xDF   // Unknown Wolink display
+
 // Various types
 #define ATC_MI_THERMOMETER 0xBE
 #define RESERVED_TESTING 0xFE

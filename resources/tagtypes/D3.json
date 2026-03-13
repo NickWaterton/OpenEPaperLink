@@ -1,0 +1,33 @@
+{
+	"version": 5,
+	"name": "Wolink BLE BWRY 2.9\"",
+	"width": 296,
+	"height": 128,
+	"rotatebuffer": 0,
+	"bpp": 2,
+	"colortable": {
+		"black":  [ 0,   0,   0   ],
+		"white":  [ 255, 255, 255 ],
+		"yellow": [ 255, 200, 0   ],
+		"red":    [ 255, 0,   0   ]
+	},
+	"shortlut": 0,
+	"contentids": [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 16, 17, 19, 20, 21, 22, 23, 27 ],
+	"template": {
+		"1": {
+			"weekday": [ 148, 3, "Signika-SB.ttf", 50 ],
+			"date": [ 148, 62, "Signika-SB.ttf", 40 ]
+		},
+		"2": {
+			"fonts": [ "Signika-SB.ttf", 150, 150, 150, 115, 90, 70 ],
+			"xy": [ 148, 53 ]
+		},
+		"21": [
+			{ "text": [ 10, 5, "OpenEpaperLink AP", "bahnschrift20", 1, 0, 0 ] },
+			{ "text": [ 10, 50, "IP address:", "t0_14b_tf", 1, 0, 0 ] },
+			{ "text": [ 120, 50, "{ap_ip}", "t0_14b_tf", 1, 0, 0 ] },
+			{ "text": [ 10, 70, "Channel:", "t0_14b_tf", 1, 0, 0 ] },
+			{ "text": [ 120, 70, "{ap_ch}", "t0_14b_tf", 1, 0, 0 ] }
+		]
+	}
+}

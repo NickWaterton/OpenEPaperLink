@@ -1,6 +1,7 @@
 #ifdef HAS_BLE_WRITER
 #include <Arduino.h>
 #include <MD5Builder.h>
+#include <mbedtls/aes.h>
 
 #include <NimBLEDevice.h>
 #include "ble_filter.h"
@@ -49,6 +50,29 @@ static NimBLEUUID ATC_BLE_OEPL_CtrlUUID((uint16_t)0x1337);
 static NimBLEUUID gicServiceUUID((uint16_t)0xfef0);
 static NimBLEUUID gicCtrlUUID((uint16_t)0xfef1);
 static NimBLEUUID gicImgUUID((uint16_t)0xfef2);
+
+// Wolink BWRY ESL UUIDs  (service name "WOLINKBLEESL2020..2024")
+static NimBLEUUID wolinkServiceUUID("30323032-4c53-4545-4c42-4b4e494c4f57");  // 2020
+static NimBLEUUID wolinkDataUUID   ("31323032-4c53-4545-4c42-4b4e494c4f57");  // 2021 - cmd/image data
+static NimBLEUUID wolinkAuthUUID   ("33323032-4c53-4545-4c42-4b4e494c4f57");  // 2023 - authentication
+static NimBLEUUID wolinkStatusUUID ("34323032-4c53-4545-4c42-4b4e494c4f57");  // 2024 - command status
+
+// AES-128-CBC key for Wolink BLE auth (manufacturer ID 0xBBAA, zero IV, take first 16 bytes)
+static const uint8_t WOLINK_BLE_KEY[16] = {
+    0x9B, 0x60, 0x9F, 0x28, 0xBC, 0x49, 0xE2, 0x57,
+    0x29, 0xBD, 0x7B, 0x8D, 0xF2, 0x2B, 0x44, 0x20
+};
+
+static volatile bool wolink_notify_received = false;
+
+static void wolinkStatusCallback(NimBLERemoteCharacteristic* pChar, uint8_t* pData, size_t length, bool isNotify) {
+    // status[0]: 0xFF=busy, 0x00=idle
+    // status[1]: 0x00=ok, 0x02=EPD write error, 0x05=Unlock Failed, etc.
+    Serial.printf("Wolink status notify (%d bytes):", (int)length);
+    for (size_t i = 0; i < length; i++) Serial.printf(" %02X", pData[i]);
+    Serial.println();
+    wolink_notify_received = true;
+}
 
 // Use NimBLE specific pointers
 NimBLERemoteCharacteristic* ctrlChar = nullptr;
@@ -106,7 +130,8 @@ class MyClientCallback : public NimBLEClientCallbacks {
 
 enum BLE_CONNECTION_TYPE {
     BLE_TYPE_GICISKY = 0,
-    BLE_TYPE_ATC_BLE_OEPL
+    BLE_TYPE_ATC_BLE_OEPL,
+    BLE_TYPE_WOLINK
 };
 
 // NimBLE Scan Callback signature uses pointers
@@ -432,6 +457,180 @@ void Upload(BLE_CONNECTION_TYPE conn_type) {
     }
 }
 
+static bool wolinkAesEncrypt(const uint8_t* plaintext, uint8_t* ciphertext) {
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    uint8_t iv[16] = {0};  // zero IV per Wolink protocol
+    if (mbedtls_aes_setkey_enc(&aes, WOLINK_BLE_KEY, 128) != 0) {
+        mbedtls_aes_free(&aes);
+        return false;
+    }
+    int ret = mbedtls_aes_crypt_cbc(&aes, MBEDTLS_AES_ENCRYPT, 16, iv, plaintext, ciphertext);
+    mbedtls_aes_free(&aes);
+    return ret == 0;
+}
+
+// Self-contained Wolink upload: encode image → connect → auth → stream chunks → refresh → wait for status
+bool PrepareAndSendWolink() {
+    static uint8_t last_addr[6];
+    if (memcmp(last_addr, BLE_curr_address, 6) != 0) {
+        BLE_err_counter = 0;
+        memcpy(last_addr, BLE_curr_address, 6);
+    }
+
+    if (!CreateBuffer()) return false;
+
+    BLE_compressed_len = wolink_encode_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING);
+    if (BLE_compressed_len == 0) {
+        FreeBuffer();
+        return false;
+    }
+    Serial.printf("Wolink: image ready %d bytes, connect attempt %d\r\n", BLE_compressed_len, BLE_err_counter);
+
+    // Build NimBLE address (ble_filter stores MAC bytes LSB-first in src[0..5])
+    uint8_t flippedAddr[6];
+    for (int i = 0; i < 6; i++) flippedAddr[i] = BLE_curr_address[5 - i];
+    NimBLEAddress targetAddr(flippedAddr, BLE_ADDR_PUBLIC);
+
+    if (!pClient) {
+        pClient = NimBLEDevice::createClient();
+        pClient->setConnectionParams(36, 60, 0, 200);
+        pClient->setClientCallbacks(new MyClientCallback(), false);
+    }
+    if (pClient->isConnected()) {
+        pClient->disconnect();
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+
+    if (!pClient->connect(targetAddr)) {
+        Serial.printf("Wolink: connection failed\r\n");
+        FreeBuffer();
+        return false;
+    }
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+
+    if (!pClient->discoverAttributes()) {
+        Serial.printf("Wolink: attribute discovery failed\r\n");
+        pClient->disconnect();
+        FreeBuffer();
+        return false;
+    }
+
+    NimBLERemoteService* pSvc = pClient->getService(wolinkServiceUUID);
+    if (!pSvc) {
+        Serial.printf("Wolink: service not found\r\n");
+        pClient->disconnect();
+        FreeBuffer();
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* dataChar   = pSvc->getCharacteristic(wolinkDataUUID);
+    NimBLERemoteCharacteristic* authChar   = pSvc->getCharacteristic(wolinkAuthUUID);
+    NimBLERemoteCharacteristic* statusChar = pSvc->getCharacteristic(wolinkStatusUUID);
+
+    if (!dataChar || !authChar || !statusChar) {
+        Serial.printf("Wolink: missing characteristic(s): data=%d auth=%d status=%d\r\n",
+                      dataChar != nullptr, authChar != nullptr, statusChar != nullptr);
+        pClient->disconnect();
+        FreeBuffer();
+        return false;
+    }
+
+    // Enable status notifications before auth so we don't miss the auth-OK event
+    wolink_notify_received = false;
+    if (statusChar->canNotify()) {
+        statusChar->subscribe(true, wolinkStatusCallback);
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+
+    // Authenticate: read 16-byte challenge, AES-128-CBC encrypt, write back
+    NimBLEAttValue challenge = authChar->readValue();
+    if (challenge.size() < 16) {
+        Serial.printf("Wolink: auth challenge too short (%d bytes)\r\n", (int)challenge.size());
+        pClient->disconnect();
+        FreeBuffer();
+        return false;
+    }
+    Serial.printf("Wolink auth challenge:");
+    for (int i = 0; i < 16; i++) Serial.printf(" %02X", challenge.data()[i]);
+    Serial.println();
+
+    uint8_t response[16];
+    if (!wolinkAesEncrypt(challenge.data(), response)) {
+        Serial.printf("Wolink: AES encryption failed\r\n");
+        pClient->disconnect();
+        FreeBuffer();
+        return false;
+    }
+    authChar->writeValue(response, 16, false);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    // Stream image in (MTU-9) byte chunks via CMD 0xA500
+    const uint32_t CHUNK_SIZE = 238;  // 247 MTU - 9 bytes framing
+    uint8_t pkt[6 + CHUNK_SIZE];
+
+    for (uint32_t offset = 0; offset < BLE_compressed_len; offset += CHUNK_SIZE) {
+        uint32_t this_chunk = BLE_compressed_len - offset;
+        if (this_chunk > CHUNK_SIZE) this_chunk = CHUNK_SIZE;
+
+        pkt[0] = 0x00;  // CMD 0xA500: upload block
+        pkt[1] = 0xA5;
+        pkt[2] = (uint8_t)(offset & 0xFF);
+        pkt[3] = (uint8_t)((offset >> 8) & 0xFF);
+        pkt[4] = (uint8_t)((offset >> 16) & 0xFF);
+        pkt[5] = (uint8_t)((offset >> 24) & 0xFF);
+        memcpy(pkt + 6, BLE_image_buffer + offset, this_chunk);
+
+        if (!dataChar->writeValue(pkt, 6 + this_chunk, true)) {
+            Serial.printf("Wolink: write failed at offset %d\r\n", offset);
+            pClient->disconnect();
+            FreeBuffer(false, true);
+            return false;
+        }
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+
+        if ((offset % (CHUNK_SIZE * 10)) < CHUNK_SIZE) {
+            Serial.printf("Wolink upload: %d / %d bytes\r\n", offset + this_chunk, BLE_compressed_len);
+        }
+    }
+    Serial.printf("Wolink: all chunks sent (%d bytes)\r\n", BLE_compressed_len);
+
+    // Trigger display refresh via CMD 0xA501
+    uint8_t refresh[6];
+    refresh[0] = 0x01;  // CMD 0xA501
+    refresh[1] = 0xA5;
+    refresh[2] = (uint8_t)(BLE_compressed_len & 0xFF);
+    refresh[3] = (uint8_t)((BLE_compressed_len >> 8) & 0xFF);
+    refresh[4] = (uint8_t)((BLE_compressed_len >> 16) & 0xFF);
+    refresh[5] = (uint8_t)((BLE_compressed_len >> 24) & 0xFF);
+    dataChar->writeValue(refresh, 6, true);
+    Serial.printf("Wolink: refresh command sent\r\n");
+
+    // Wait up to 30 s for status notification (display refresh complete)
+    bool success = false;
+    uint32_t timeout_start = millis();
+    while (millis() - timeout_start < 30000) {
+        if (wolink_notify_received) {
+            Serial.printf("Wolink: status received, upload complete\r\n");
+            success = true;
+            break;
+        }
+        if (!pClient->isConnected()) {
+            Serial.printf("Wolink: disconnected while waiting\r\n");
+            break;
+        }
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    if (!success) {
+        Serial.printf("Wolink: timeout waiting for status notification\r\n");
+    }
+
+    pClient->disconnect();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    FreeBuffer(success, true);
+    return success;
+}
+
 void BLETask(void* parameter) {
     vTaskDelay(pdMS_TO_TICKS(5000));
     Serial.println("BLE task started");
@@ -463,8 +662,13 @@ void BLETask(void* parameter) {
                         pScan->stop();
                         Serial.println("BLE Image is pending but we wait a bit");
                         vTaskDelay(500 / portTICK_PERIOD_MS);                             // We better wait here, since the pending image needs to be created first
-                        conn_type = BLE_curr_address[7] == 0x13 && BLE_curr_address[6] == 0x37 ? BLE_TYPE_ATC_BLE_OEPL : BLE_TYPE_GICISKY; // what type of OEPL display is this
-                        PrepareAndConnect(conn_type);
+                        if (BLE_curr_address[7] == 0xBB && BLE_curr_address[6] == 0xAA) {
+                            // Wolink BWRY ESL — uses its own self-contained upload flow
+                            PrepareAndSendWolink();
+                        } else {
+                            conn_type = BLE_curr_address[7] == 0x13 && BLE_curr_address[6] == 0x37 ? BLE_TYPE_ATC_BLE_OEPL : BLE_TYPE_GICISKY;
+                            PrepareAndConnect(conn_type);
+                        }
                         BLE_last_pending_check = millis();
                     }
                 }

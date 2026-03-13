@@ -16,6 +16,18 @@
 
 uint8_t* Mirrorbuffer;
 
+uint8_t wolinkPidToOEPLtype(uint16_t pid) {
+    switch (pid) {
+        case 0x0008: return WOLINK_BLE_154_BWRY;
+        case 0x000A: return WOLINK_BLE_213_BWRY;
+        case 0x000E: return WOLINK_BLE_213V_BWRY;
+        case 0x0012: return WOLINK_BLE_29_BWRY;
+        case 0x0016: return WOLINK_BLE_42_BWRY;
+        case 0x001A: return WOLINK_BLE_58_BWRY;
+        default:     return WOLINK_BLE_UNKNOWN;
+    }
+}
+
 uint8_t gicToOEPLtype(uint8_t gicType) {
     switch (gicType) {
         case 0xA0:
@@ -247,6 +259,38 @@ bool BLE_filter_add_device(NimBLEAdvertisedDevice& advertisedDevice) {
             theAdvData.src[7] = manuData[1];
             processDataReq(&theAdvData, true);
             return true;
+        } else if (manuDatalen >= 10 && manuData[0] == 0xAA && manuData[1] == 0xBB) {  // Wolink BWRY ESL (manufacturer ID 0xBBAA)
+            Serial.printf("Wolink BWRY ESL Detected\r\n");
+            struct espAvailDataReq theAdvData;
+            memset((uint8_t*)&theAdvData, 0x00, sizeof(espAvailDataReq));
+
+            // Manufacturer data layout (after 2-byte ID):
+            //   [2..3] flags, [4..5] PID (big-endian), [6..7] app_version, [8..9] hw_version
+            //   [last-1..last] battery mV (big-endian)
+            uint16_t pid   = ((uint16_t)manuData[4] << 8) | manuData[5];
+            uint16_t batmv = ((uint16_t)manuData[manuDatalen - 2] << 8) | manuData[manuDatalen - 1];
+            uint16_t appVer = ((uint16_t)manuData[6] << 8) | manuData[7];
+
+            uint8_t macReversed[6];
+            memcpy(&macReversed, (uint8_t*)currentAddr.getVal(), 6);
+            theAdvData.src[0] = macReversed[0];
+            theAdvData.src[1] = macReversed[1];
+            theAdvData.src[2] = macReversed[2];
+            theAdvData.src[3] = macReversed[3];
+            theAdvData.src[4] = macReversed[4];
+            theAdvData.src[5] = macReversed[5];
+            theAdvData.src[6] = 0xAA;  // Wolink identifier: low byte of mfr_id 0xBBAA
+            theAdvData.src[7] = 0xBB;  // Wolink identifier: high byte of mfr_id 0xBBAA
+            theAdvData.adr.batteryMv = batmv;
+            theAdvData.adr.lastPacketRSSI = advertisedDevice.getRSSI();
+            theAdvData.adr.lastPacketLQI = advertisedDevice.getRSSI();
+            theAdvData.adr.hwType = wolinkPidToOEPLtype(pid);
+            theAdvData.adr.tagSoftwareVersion = appVer;
+            theAdvData.adr.capabilities = 0x00;
+
+            Serial.printf("  Wolink PID: 0x%04X -> hwType 0x%02X, bat: %dmV\r\n", pid, theAdvData.adr.hwType, batmv);
+            processDataReq(&theAdvData, true);
+            return true;
         }
     }
     if (payloadDatalen >= 17) {  // Lets check for an ATC Mi Thermometer
@@ -293,6 +337,14 @@ bool BLE_is_image_pending(uint8_t address[8]) {
         if (taginfo->pendingCount > 0 && taginfo->version == 0 && (taginfo->mac[7] == 0x13) && (taginfo->mac[6] == 0x37)) {
             memcpy(address, taginfo->mac, 8);
             Serial.printf("ATC BLE OEPL data Waiting\r\n");
+            return true;
+        }
+    }
+    for (int16_t c = 0; c < tagDB.size(); c++) {
+        tagRecord* taginfo = tagDB.at(c);
+        if (taginfo->pendingCount > 0 && taginfo->version == 0 && (taginfo->mac[7] == 0xBB) && (taginfo->mac[6] == 0xAA)) {
+            memcpy(address, taginfo->mac, 8);
+            Serial.printf("Wolink BWRY data Waiting\r\n");
             return true;
         }
     }
@@ -518,6 +570,116 @@ uint32_t compress_image(uint8_t address[8], uint8_t* buffer, uint32_t max_len) {
     }
     free(Mirrorbuffer);
     return len_compressed;
+}
+
+// ---------------------------------------------------------------------------
+// Wolink BWRY ESL image encoder
+// ---------------------------------------------------------------------------
+// Converts OEPL row-major 1bpp dual-plane image to Wolink column-major 2bpp.
+//
+// Source format (from spr2buffer/spr2color with bpp=2, 4-color palette):
+//   [BW plane]    row-major 1bpp: pixel(x,y) = byte[(y*w+x)/8], bit 7-(x%8)
+//                 bit=1 for WHITE and RED pixels
+//   [Color plane] same layout
+//                 bit=1 for YELLOW and RED pixels
+//
+// Wolink destination format (2 bits/pixel, column-major, y-flipped in RAM):
+//   byte_idx  = x * (height/4) + phy_y / 4   where phy_y = (height-1) - y
+//   bit_shift = 6 - (phy_y % 4) * 2
+//   color: BLACK=0b00, WHITE=0b01, YELLOW=0b10, RED=0b11
+//
+// BW+Color → Wolink color mapping:
+//   BW=0, Color=0 → BLACK  (0b00)
+//   BW=1, Color=0 → WHITE  (0b01)
+//   BW=0, Color=1 → YELLOW (0b10)
+//   BW=1, Color=1 → RED    (0b11)
+
+struct WolinkDisplayInfo { uint16_t width; uint16_t height; };
+
+static WolinkDisplayInfo getWolinkDisplayInfo(uint8_t hwType) {
+    switch (hwType) {
+        case WOLINK_BLE_154_BWRY:  return {200, 200};
+        case WOLINK_BLE_213_BWRY:  return {250, 128};
+        case WOLINK_BLE_213V_BWRY: return {250, 128};
+        case WOLINK_BLE_29_BWRY:   return {296, 128};
+        case WOLINK_BLE_42_BWRY:   return {400, 300};
+        case WOLINK_BLE_58_BWRY:   return {648, 480};
+        default:                    return {250, 128};
+    }
+}
+
+uint32_t wolink_encode_image(uint8_t address[8], uint8_t* buffer, uint32_t max_len) {
+    uint32_t t = millis();
+    PendingItem* queueItem = getQueueItem(address, 0);
+    if (queueItem == nullptr) {
+        prepareCancelPending(address);
+        Serial.printf("wolink_encode_image: couldn't find pending item\r\n");
+        return 0;
+    }
+    if (queueItem->data == nullptr) {
+        fs::File file = contentFS->open(queueItem->filename);
+        if (!file) {
+            Serial.print("Wolink: no file " + String(queueItem->filename) + ", canceling\r\n");
+            prepareCancelPending(address);
+            return 0;
+        }
+        queueItem->data = getDataForFile(file);
+        file.close();
+        Serial.println("Wolink: read " + String(queueItem->filename) + " in " + String(millis() - t) + "ms");
+    }
+
+    tagRecord* taginfo = tagRecord::findByMAC(address);
+    if (taginfo == nullptr) {
+        prepareCancelPending(address);
+        Serial.printf("wolink_encode_image: tag record not found\r\n");
+        return 0;
+    }
+
+    WolinkDisplayInfo disp = getWolinkDisplayInfo(taginfo->hwType);
+    uint16_t width  = disp.width;
+    uint16_t height = disp.height;
+
+    // plane_size: bytes for one 1bpp plane, packed without row alignment
+    uint32_t plane_size   = ((uint32_t)width * height + 7) / 8;
+    bool     has_color    = (queueItem->len >= plane_size * 2);
+    // Wolink: 2bpp column-major, 32 bytes per column for 128-tall display
+    uint32_t bytes_per_col = ((uint32_t)height * 2 + 7) / 8;  // = height / 4 when height%4==0
+    uint32_t out_size      = (uint32_t)width * bytes_per_col;
+
+    Serial.printf("Wolink encode: %dx%d, plane=%d bytes, out=%d bytes, has_color=%d\r\n",
+                  width, height, plane_size, out_size, has_color);
+
+    if (out_size > max_len) {
+        Serial.printf("Wolink: output buffer too small (%d > %d)\r\n", out_size, max_len);
+        prepareCancelPending(address);
+        return 0;
+    }
+
+    memset(buffer, 0, out_size);
+    const uint8_t* bw_plane    = queueItem->data;
+    const uint8_t* color_plane = queueItem->data + plane_size;
+
+    for (uint16_t x = 0; x < width; x++) {
+        for (uint16_t y = 0; y < height; y++) {
+            // Source: row-major 1bpp — bit position uses x%8, not linear index %8
+            uint32_t src_byte = ((uint32_t)y * width + x) / 8;
+            uint8_t  src_bit  = 7 - (x % 8);
+
+            uint8_t bw_bit    = (bw_plane[src_byte] >> src_bit) & 1;
+            uint8_t color_bit = has_color ? ((color_plane[src_byte] >> src_bit) & 1) : 0;
+
+            // Wolink 2bpp: (color_bit << 1) | bw_bit
+            uint8_t  color     = (color_bit << 1) | bw_bit;
+            uint16_t phy_y     = (height - 1) - y;           // y-flip
+            uint32_t dst_byte  = (uint32_t)x * bytes_per_col + phy_y / 4;
+            uint8_t  dst_shift = 6 - (phy_y % 4) * 2;       // 2bpp MSB-first per 4-pixel group
+
+            buffer[dst_byte] |= color << dst_shift;
+        }
+    }
+
+    Serial.printf("Wolink image encoded in %dms, %d bytes\r\n", millis() - t, out_size);
+    return out_size;
 }
 
 uint32_t get_ATC_BLE_OEPL_image(uint8_t address[8], uint8_t* buffer, uint32_t max_len, uint8_t* dataType, uint8_t* dataTypeArgument, uint16_t* nextCheckIn) {
