@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "commstructs.h"
 #include "language.h"
 #include "storage.h"
 #include "util.h"
@@ -438,6 +439,35 @@ HwType getHwType(const uint8_t id) {
                 }
                 return hwdata.at(id);
             }
+        }
+        // Built-in fallback for Wolink BWRY BLE displays (no JSON file needed)
+        // bpp=2, 4-color palette [black, white, yellow, red], rotatebuffer=0
+        if (id >= WOLINK_BLE_154_BWRY && id <= WOLINK_BLE_UNKNOWN) {
+            HwType& hwType = hwdata[id];
+            hwType.id = id;
+            hwType.rotatebuffer = 0;
+            hwType.bpp = 2;
+            hwType.shortlut = 0;
+            hwType.zlib = 0;
+            hwType.g5 = 0;
+            hwType.highlightColor = 2;
+            hwType.colortable = {
+                Color(0,   0,   0  ),  // index 0: black
+                Color(255, 255, 255),  // index 1: white
+                Color(255, 200, 0  ),  // index 2: yellow
+                Color(255, 0,   0  ),  // index 3: red
+            };
+            switch (id) {
+                case WOLINK_BLE_154_BWRY:  hwType.width = 200; hwType.height = 200; break;
+                case WOLINK_BLE_213_BWRY:  hwType.width = 250; hwType.height = 128; break;
+                case WOLINK_BLE_213V_BWRY: hwType.width = 250; hwType.height = 128; break;
+                case WOLINK_BLE_29_BWRY:   hwType.width = 296; hwType.height = 128; break;
+                case WOLINK_BLE_42_BWRY:   hwType.width = 400; hwType.height = 300; break;
+                case WOLINK_BLE_58_BWRY:   hwType.width = 648; hwType.height = 480; break;
+                default:                   hwType.width = 250; hwType.height = 128; break;
+            }
+            Serial.printf("Wolink built-in hwType 0x%02X: %dx%d\r\n", id, hwType.width, hwType.height);
+            return hwdata.at(id);
         }
         return {0, 0, 0, 0, 0, 0, 0};
     }
