@@ -1363,7 +1363,8 @@ function drawCanvas(buffer, canvas, hwtype, tagmac, doRotate) {
 		}
 	} else {
 
-		const offsetRed = (data.length >= (canvas.width * canvas.height / 8) * 2) ? canvas.width * canvas.height / 8 : 0;
+		const planeSize = Math.ceil(canvas.width * canvas.height / 8);
+		const offsetRed = (data.length >= planeSize * 2) ? planeSize : 0;
 		let pixelValue = 0;
 		const colorTable = tagTypes[hwtype].colortable;
 		for (let i = 0; i < data.length; i++) {
