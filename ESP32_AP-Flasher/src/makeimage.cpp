@@ -209,8 +209,9 @@ void spr2color(TFT_eSprite &spr, imgParam &imageParams, uint8_t *buffer, size_t 
                 }
                 bitOffset += imageParams.bpp;
             } else {
-                uint8_t bitIndex = 7 - (x % 8);
-                uint32_t byteIndex = (y * bufw + x) / 8;
+                uint32_t linearBit = (uint32_t)y * bufw + x;
+                uint8_t bitIndex = 7 - (linearBit % 8);
+                uint32_t byteIndex = linearBit / 8;
 
                 // this looks a bit ugly, but it's performing better than shorter notations
                 switch (best_color_index) {

@@ -578,7 +578,7 @@ uint32_t compress_image(uint8_t address[8], uint8_t* buffer, uint32_t max_len) {
 // Converts OEPL row-major 1bpp dual-plane image to Wolink column-major 2bpp.
 //
 // Source format (from spr2buffer/spr2color with bpp=2, 4-color palette):
-//   [BW plane]    row-major 1bpp: pixel(x,y) = byte[(y*w+x)/8], bit 7-(x%8)
+//   [BW plane]    dense 1bpp: pixel(x,y) = byte[(y*w+x)/8], bit 7-((y*w+x)%8)
 //                 bit=1 for WHITE and RED pixels
 //   [Color plane] same layout
 //                 bit=1 for YELLOW and RED pixels
@@ -662,9 +662,10 @@ uint32_t wolink_encode_image(uint8_t address[8], uint8_t* buffer, uint32_t max_l
 
     for (uint16_t x = 0; x < width; x++) {
         for (uint16_t y = 0; y < height; y++) {
-            // Source: row-major 1bpp — bit position uses x%8, not linear index %8
-            uint32_t src_byte = ((uint32_t)y * width + x) / 8;
-            uint8_t  src_bit  = 7 - (x % 8);
+            // Source: true dense 1bpp — bit position uses linear index for correct non-8-aligned widths
+            uint32_t linear_bit = (uint32_t)y * width + x;
+            uint32_t src_byte = linear_bit / 8;
+            uint8_t  src_bit  = 7 - (linear_bit % 8);
 
             uint8_t bw_bit    = (bw_plane[src_byte] >> src_bit) & 1;
             uint8_t color_bit = has_color ? ((color_plane[src_byte] >> src_bit) & 1) : 0;
