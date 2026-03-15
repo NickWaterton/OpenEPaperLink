@@ -1392,8 +1392,8 @@ function drawCanvas(buffer, canvas, hwtype, tagmac, doRotate) {
 		tmp.width = h;
 		tmp.height = w;
 		const tctx = tmp.getContext('2d');
-		tctx.translate(h, 0);
-		tctx.rotate(Math.PI / 2);
+		tctx.translate(0, w);
+		tctx.rotate(-Math.PI / 2);
 		tctx.drawImage(canvas, 0, 0);
 		canvas.width = h;
 		canvas.height = w;
