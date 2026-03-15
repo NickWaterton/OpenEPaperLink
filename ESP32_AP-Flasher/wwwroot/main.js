@@ -1384,6 +1384,21 @@ function drawCanvas(buffer, canvas, hwtype, tagmac, doRotate) {
 	}
 
 	ctx.putImageData(imageData, 0, 0);
+
+	// Auto-rotate landscape tile previews to portrait so all tiles show consistently
+	if (doRotate && canvas.width > canvas.height && data.length > 0) {
+		const w = canvas.width, h = canvas.height;
+		const tmp = document.createElement('canvas');
+		tmp.width = h;
+		tmp.height = w;
+		const tctx = tmp.getContext('2d');
+		tctx.translate(h, 0);
+		tctx.rotate(Math.PI / 2);
+		tctx.drawImage(canvas, 0, 0);
+		canvas.width = h;
+		canvas.height = w;
+		canvas.getContext('2d').drawImage(tmp, 0, 0);
+	}
 }
 
 function processZlib(data) {
