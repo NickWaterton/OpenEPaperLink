@@ -470,6 +470,80 @@ static bool wolinkAesEncrypt(const uint8_t* plaintext, uint8_t* ciphertext) {
     return ret == 0;
 }
 
+// Send a Wolink LED flash command: connect → auth → CMD 0xA508 → disconnect
+// CMD 0xA508: [0x08,0xA5, R, G, B, on_lo, on_hi, off_lo, off_hi, work_0..3]
+bool SendWolinkLedFlash(uint8_t r, uint8_t g, uint8_t b, uint16_t on_ms, uint16_t off_ms, uint32_t work_ms) {
+    uint8_t flippedAddr[6];
+    for (int i = 0; i < 6; i++) flippedAddr[i] = BLE_curr_address[5 - i];
+    NimBLEAddress targetAddr(flippedAddr, BLE_ADDR_PUBLIC);
+
+    if (!pClient) {
+        pClient = NimBLEDevice::createClient();
+        pClient->setConnectionParams(36, 60, 0, 200);
+        pClient->setClientCallbacks(new MyClientCallback(), false);
+    }
+    if (pClient->isConnected()) {
+        pClient->disconnect();
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+    if (!pClient->connect(targetAddr)) {
+        Serial.printf("Wolink LED: connection failed\r\n");
+        return false;
+    }
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+
+    if (!pClient->discoverAttributes()) {
+        Serial.printf("Wolink LED: attribute discovery failed\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLERemoteService* pSvc = pClient->getService(wolinkServiceUUID);
+    if (!pSvc) {
+        Serial.printf("Wolink LED: service not found\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* dataChar = pSvc->getCharacteristic(wolinkDataUUID);
+    NimBLERemoteCharacteristic* authChar = pSvc->getCharacteristic(wolinkAuthUUID);
+    if (!dataChar || !authChar) {
+        Serial.printf("Wolink LED: missing characteristic(s)\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLEAttValue challenge = authChar->readValue();
+    if (challenge.size() < 16) {
+        Serial.printf("Wolink LED: auth challenge too short\r\n");
+        pClient->disconnect();
+        return false;
+    }
+    uint8_t response[16];
+    if (!wolinkAesEncrypt(challenge.data(), response)) {
+        pClient->disconnect();
+        return false;
+    }
+    authChar->writeValue(response, 16, false);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    uint8_t pkt[13];
+    pkt[0]  = 0x08; pkt[1]  = 0xA5;  // CMD 0xA508
+    pkt[2]  = r;    pkt[3]  = g;    pkt[4]  = b;
+    pkt[5]  = on_ms  & 0xFF;  pkt[6]  = (on_ms  >> 8) & 0xFF;
+    pkt[7]  = off_ms & 0xFF;  pkt[8]  = (off_ms >> 8) & 0xFF;
+    pkt[9]  = work_ms & 0xFF; pkt[10] = (work_ms >> 8) & 0xFF;
+    pkt[11] = (work_ms >> 16) & 0xFF; pkt[12] = (work_ms >> 24) & 0xFF;
+
+    Serial.printf("Wolink LED flash: RGB(%d,%d,%d) on=%dms off=%dms duration=%dms\r\n",
+                  r, g, b, on_ms, off_ms, work_ms);
+    bool ok = dataChar->writeValue(pkt, sizeof(pkt), true);
+
+    pClient->disconnect();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    return ok;
+}
+
 // Self-contained Wolink upload: encode image → connect → auth → stream chunks → refresh → wait for status
 bool PrepareAndSendWolink() {
     static uint8_t last_addr[6];
@@ -663,8 +737,33 @@ void BLETask(void* parameter) {
                         Serial.println("BLE Image is pending but we wait a bit");
                         vTaskDelay(500 / portTICK_PERIOD_MS);                             // We better wait here, since the pending image needs to be created first
                         if (BLE_curr_address[7] == 0xBB && BLE_curr_address[6] == 0xAA) {
-                            // Wolink BWRY ESL — uses its own self-contained upload flow
-                            PrepareAndSendWolink();
+                            // Wolink BWRY ESL — check pending type before dispatching
+                            PendingItem* item = getQueueItem(BLE_curr_address);
+                            if (item != nullptr
+                                    && item->pendingdata.availdatainfo.dataType == DATATYPE_COMMAND_DATA
+                                    && item->pendingdata.availdatainfo.dataTypeArgument == CMD_DO_LEDFLASH) {
+                                // Extract ledFlash payload (stored in dataVer + dataSize fields by sendTagCommand)
+                                uint8_t payload[12] = {0};
+                                memcpy(payload,     &item->pendingdata.availdatainfo.dataVer,  8);
+                                memcpy(payload + 8, &item->pendingdata.availdatainfo.dataSize, 4);
+                                struct ledFlash* lf = (struct ledFlash*)payload;
+                                // Convert RGB332 color1 to RGB888
+                                uint8_t r = ((lf->color1 >> 5) & 0x7) * 36;
+                                uint8_t g = ((lf->color1 >> 2) & 0x7) * 36;
+                                uint8_t b = (lf->color1 & 0x3) * 85;
+                                // Map OEPL flash timing to Wolink ms values
+                                uint16_t on_ms   = lf->flashSpeed1 ? lf->flashSpeed1 * 100 : 80;
+                                uint16_t off_ms  = lf->delay1      ? lf->delay1 * 100      : 500;
+                                uint32_t work_ms = lf->repeats     ? lf->repeats * 5000UL  : 5000;
+                                bool ok = SendWolinkLedFlash(r, g, b, on_ms, off_ms, work_ms);
+                                dequeueItem(BLE_curr_address);
+                                struct espXferComplete reportStruct = {0};
+                                memcpy(reportStruct.src, BLE_curr_address, 8);
+                                if (ok) processXferComplete(&reportStruct, true);
+                                else    processXferTimeout(&reportStruct, true);
+                            } else {
+                                PrepareAndSendWolink();
+                            }
                         } else {
                             conn_type = BLE_curr_address[7] == 0x13 && BLE_curr_address[6] == 0x37 ? BLE_TYPE_ATC_BLE_OEPL : BLE_TYPE_GICISKY;
                             PrepareAndConnect(conn_type);
