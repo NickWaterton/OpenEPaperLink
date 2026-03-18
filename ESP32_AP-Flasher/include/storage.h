@@ -40,6 +40,7 @@ class DynStorage {
 extern SemaphoreHandle_t fsMutex;
 extern DynStorage Storage;
 extern fs::FS *contentFS;
+extern void prepareRestart();
 #ifndef SD_CARD_ONLY
 extern void copyFile(File in, File out);
 #endif

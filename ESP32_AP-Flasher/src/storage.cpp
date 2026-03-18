@@ -269,3 +269,19 @@ void DynStorage::end() {
 
 fs::FS* contentFS;
 DynStorage Storage;
+
+void prepareRestart() {
+#ifdef HAS_SDCARD
+#ifndef SD_CARD_SDMMC
+    // Unmount SPI SD card cleanly before software reset.
+    // Without this the SD card is left mid-transaction and won't respond
+    // to the next initialisation sequence, requiring a power cycle.
+    Serial.println("Unmounting SD card before restart");
+    SD.end();
+    if (spi) {
+        spi->end();
+        spi = nullptr;
+    }
+#endif
+#endif
+}

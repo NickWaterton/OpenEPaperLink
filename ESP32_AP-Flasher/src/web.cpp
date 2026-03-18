@@ -137,6 +137,7 @@ void wsSendSysteminfo() {
         saveDB("/current/tagDB.json");
         ws.closeAll();
         delay(100);
+        prepareRestart();
         ESP.restart();
     }
 
@@ -263,6 +264,7 @@ void init_web() {
         saveDB("/current/tagDB.json");
         ws.closeAll();
         delay(100);
+        prepareRestart();
         ESP.restart();
     });
 
@@ -797,6 +799,7 @@ void init_web() {
 
         ws.closeAll();
         delay(100);
+        prepareRestart();
         ESP.restart();
     });
     server.addHandler(handler);

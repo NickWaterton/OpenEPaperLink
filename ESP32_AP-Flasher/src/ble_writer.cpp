@@ -6,6 +6,8 @@
 #include <NimBLEDevice.h>
 #include "ble_filter.h"
 #include "newproto.h"
+#include "tag_db.h"
+#include "web.h"
 
 #define INTERVAL_BLE_SCANNING_SECONDS 60
 #define INTERVAL_HANDLE_PENDING_SECONDS 10
@@ -133,6 +135,19 @@ enum BLE_CONNECTION_TYPE {
     BLE_TYPE_ATC_BLE_OEPL,
     BLE_TYPE_WOLINK
 };
+
+BLE_CONNECTION_TYPE Get_Connection_Type(uint8_t address[8]) {
+    if (address[7] == 0x41 && address[6] == 0x0B) {
+        return BLE_TYPE_GICISKY;
+    }
+    if (address[7] == 0x13 && address[6] == 0x37) {
+        return BLE_TYPE_ATC_BLE_OEPL;
+    }
+    if (address[7] == 0xBB && address[6] == 0xAA) {
+        return BLE_TYPE_WOLINK;
+    }
+    return BLE_TYPE_GICISKY;
+}
 
 // NimBLE Scan Callback signature uses pointers
 class MyAdvertisedDeviceCallbacks : public NimBLEScanCallbacks {
@@ -308,155 +323,6 @@ bool CreateBuffer() {
     return true;
 }
 
-bool PrepareAndConnect(BLE_CONNECTION_TYPE conn_type) {
-    // Create buffer, fill compressed buffer and connect
-    // if the BLE_curr_address changes, reset the error count
-    static uint8_t last_addr[6];
-    if (memcmp(last_addr, BLE_curr_address, 6) != 0) {
-        BLE_err_counter = 0;
-        Serial.printf("BLE new tag: reset error count: %i\r\n", BLE_err_counter);
-        memcpy(last_addr, BLE_curr_address, 6);
-    }
-    uint8_t dataType = 0x00;
-    uint8_t dataTypeArgument = 0x00;
-    uint16_t nextCheckin = 0x00;
-    if (CreateBuffer()) {
-        if (conn_type == BLE_TYPE_ATC_BLE_OEPL) {
-            BLE_compressed_len = get_ATC_BLE_OEPL_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING, &dataType, &dataTypeArgument, &nextCheckin);
-            if (BLE_compressed_len) {
-                uint8_t md5bytes[16];
-                MD5Builder md5;
-                md5.begin();
-                md5.add(BLE_image_buffer, BLE_compressed_len);
-                md5.calculate();
-                md5.getBytes(md5bytes);
-
-                BLEavaildatainfo.dataType = dataType;
-                BLEavaildatainfo.dataVer = *((uint64_t*)md5bytes);
-                BLEavaildatainfo.dataSize = BLE_compressed_len;
-                BLEavaildatainfo.dataTypeArgument = dataTypeArgument;
-                BLEavaildatainfo.nextCheckIn = nextCheckin;
-                BLEavaildatainfo.checksum = 0;
-                for (uint16_t c = 1; c < sizeof(struct AvailDataInfo); c++) {
-                    BLEavaildatainfo.checksum += (uint8_t)((uint8_t*)&BLEavaildatainfo)[c];
-                }
-            }
-        } else {
-            BLE_compressed_len = compress_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING);
-        }
-        Serial.printf("BLE Compressed Length: %i\r\n", BLE_compressed_len);
-        Serial.printf("BLE connection try: %i\r\n", BLE_err_counter);
-        // then we connect to BLE to send the compressed data
-        if (BLE_compressed_len && BLE_connect(BLE_curr_address, conn_type)) {
-            memset(BLE_notify_buffer, 0x00, sizeof(BLE_notify_buffer));
-            ble_main_state = BLE_MAIN_STATE_UPLOAD;
-            BLE_upload_state = BLE_UPLOAD_STATE_INIT;
-            BLE_new_notify = true;  // trigger the upload here
-            return true;
-        }
-    } 
-    FreeBuffer();
-    return false;
-}
-
-void Upload(BLE_CONNECTION_TYPE conn_type) {
-    // We call this each time we get a Notify from the tag, and progress through the upload stages
-    if (BLE_curr_part == 0)
-        Serial.println("BLE Starting Upload");
-    BLE_new_notify = false;
-    BLE_last_notify = millis();
-    switch (conn_type) {
-        default:
-        case BLE_TYPE_GICISKY:
-            BLE_upload_state = BLE_notify_buffer[1];
-            switch (BLE_upload_state) {
-                default:
-                case BLE_UPLOAD_STATE_INIT:
-                    BLE_mini_buff[0] = 0x01;
-                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 1);
-                    break;
-                case BLE_UPLOAD_STATE_SIZE:
-                    BLE_mini_buff[0] = 0x02;
-                    BLE_mini_buff[1] = BLE_compressed_len & 0xff;
-                    BLE_mini_buff[2] = (BLE_compressed_len >> 8) & 0xff;
-                    BLE_mini_buff[3] = (BLE_compressed_len >> 16) & 0xff;
-                    BLE_mini_buff[4] = (BLE_compressed_len >> 24) & 0xff;
-                    BLE_mini_buff[5] = 0x00;
-                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 6);
-                    break;
-                case BLE_UPLOAD_STATE_START:
-                    BLE_mini_buff[0] = 0x03;
-                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 1);
-                    break;
-                case BLE_UPLOAD_STATE_UPLOAD:
-                    if (BLE_notify_buffer[2] == 0x08) {
-                        // Done and the image is refreshing now
-                        FreeBuffer(true, true);
-                    } else {
-                        uint32_t req_curr_part = (BLE_notify_buffer[6] << 24) | (BLE_notify_buffer[5] << 24) | (BLE_notify_buffer[4] << 24) | BLE_notify_buffer[3];
-                        if (req_curr_part != BLE_curr_part) {
-                            Serial.printf("Something went wrong, expected req part: %i but got: %i we better abort here.\r\n", req_curr_part, BLE_curr_part);
-                            FreeBuffer(false, true);
-                        }
-                        uint32_t curr_len = 240;
-                        if (BLE_compressed_len - (BLE_curr_part * 240) < 240)
-                            curr_len = BLE_compressed_len - (BLE_curr_part * 240);
-                        BLE_mini_buff[0] = BLE_curr_part & 0xff;
-                        BLE_mini_buff[1] = (BLE_curr_part >> 8) & 0xff;
-                        BLE_mini_buff[2] = (BLE_curr_part >> 16) & 0xff;
-                        BLE_mini_buff[3] = (BLE_curr_part >> 24) & 0xff;
-                        memcpy((uint8_t*)&BLE_mini_buff[4], (uint8_t*)&BLE_image_buffer[BLE_curr_part * 240], curr_len);
-                        imgChar->writeValue((const uint8_t*)BLE_mini_buff, curr_len + 4);
-                        Serial.printf("BLE sending part: %i\r\n", BLE_curr_part);
-                        BLE_curr_part++;
-                    }
-                    break;
-            }
-            break;
-        case BLE_TYPE_ATC_BLE_OEPL:
-            switch (BLE_upload_state) {
-                default:
-                case BLE_UPLOAD_STATE_INIT:
-                    BLE_mini_buff[0] = 0x00;
-                    BLE_mini_buff[1] = 0x64;
-                    memcpy((uint8_t*)&BLE_mini_buff[2], &BLEavaildatainfo, sizeof(struct AvailDataInfo));
-                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, sizeof(struct AvailDataInfo) + 2);
-                    BLE_upload_state = BLE_UPLOAD_STATE_UPLOAD;
-                    break;
-                case BLE_UPLOAD_STATE_UPLOAD:
-                    uint8_t notifyLen = BLE_notify_buffer[0];
-                    uint16_t notifyCMD = (BLE_notify_buffer[1] << 8) | BLE_notify_buffer[2];
-                    Serial.println("BLE CMD " + String(notifyCMD));
-                    switch (notifyCMD) {
-                        case BLE_CMD_REQ:
-                            if (notifyLen == (sizeof(struct blockRequest) + 2)) {
-                                Serial.println("We got a request for a BLK");
-                                memcpy(&BLEblkRequst, &BLE_notify_buffer[3], sizeof(struct blockRequest));
-                                BLE_curr_part = 0;
-                                ATC_BLE_OEPL_PrepareBlk(BLEblkRequst.blockId);
-                                ATC_BLE_OEPL_SendPart(BLEblkRequst.blockId, BLE_curr_part);
-                            }
-                            break;
-                        case BLE_CMD_ACK_BLKPRT:
-                            BLE_curr_part++;
-                            BLE_err_counter = 0;
-                        case BLE_CMD_ERR_BLKPRT:
-                            if (BLE_curr_part <= BLE_max_block_parts && BLE_err_counter++ < 15) {
-                                ATC_BLE_OEPL_SendPart(BLEblkRequst.blockId, BLE_curr_part);
-                                break;
-                            }  // FALLTROUGH!!! We cancel the upload if we land here since we dont have so many parts of a block!
-                        case BLE_CMD_ACK:
-                        case BLE_CMD_ACK_IS_SHOWN:
-                        case BLE_CMD_ACK_FW_UPDATED:
-                            FreeBuffer(true, true);
-                            break;
-                    }
-                    break;
-            }
-            break;
-    }
-}
-
 static bool wolinkAesEncrypt(const uint8_t* plaintext, uint8_t* ciphertext) {
     mbedtls_aes_context aes;
     mbedtls_aes_init(&aes);
@@ -470,90 +336,8 @@ static bool wolinkAesEncrypt(const uint8_t* plaintext, uint8_t* ciphertext) {
     return ret == 0;
 }
 
-// Send a Wolink LED flash command: connect → auth → CMD 0xA508 → disconnect
-// CMD 0xA508: [0x08,0xA5, R, G, B, on_lo, on_hi, off_lo, off_hi, work_0..3]
-bool SendWolinkLedFlash(uint8_t r, uint8_t g, uint8_t b, uint16_t on_ms, uint16_t off_ms, uint32_t work_ms) {
-    uint8_t flippedAddr[6];
-    for (int i = 0; i < 6; i++) flippedAddr[i] = BLE_curr_address[5 - i];
-    NimBLEAddress targetAddr(flippedAddr, BLE_ADDR_PUBLIC);
-
-    if (!pClient) {
-        pClient = NimBLEDevice::createClient();
-        pClient->setConnectionParams(36, 60, 0, 200);
-        pClient->setClientCallbacks(new MyClientCallback(), false);
-    }
-    if (pClient->isConnected()) {
-        pClient->disconnect();
-        vTaskDelay(50 / portTICK_PERIOD_MS);
-    }
-    if (!pClient->connect(targetAddr)) {
-        Serial.printf("Wolink LED: connection failed\r\n");
-        return false;
-    }
-    vTaskDelay(300 / portTICK_PERIOD_MS);
-
-    if (!pClient->discoverAttributes()) {
-        Serial.printf("Wolink LED: attribute discovery failed\r\n");
-        pClient->disconnect();
-        return false;
-    }
-
-    NimBLERemoteService* pSvc = pClient->getService(wolinkServiceUUID);
-    if (!pSvc) {
-        Serial.printf("Wolink LED: service not found\r\n");
-        pClient->disconnect();
-        return false;
-    }
-
-    NimBLERemoteCharacteristic* dataChar = pSvc->getCharacteristic(wolinkDataUUID);
-    NimBLERemoteCharacteristic* authChar = pSvc->getCharacteristic(wolinkAuthUUID);
-    if (!dataChar || !authChar) {
-        Serial.printf("Wolink LED: missing characteristic(s)\r\n");
-        pClient->disconnect();
-        return false;
-    }
-
-    NimBLEAttValue challenge = authChar->readValue();
-    if (challenge.size() < 16) {
-        Serial.printf("Wolink LED: auth challenge too short\r\n");
-        pClient->disconnect();
-        return false;
-    }
-    uint8_t response[16];
-    if (!wolinkAesEncrypt(challenge.data(), response)) {
-        pClient->disconnect();
-        return false;
-    }
-    authChar->writeValue(response, 16, false);
-    vTaskDelay(100 / portTICK_PERIOD_MS);
-
-    uint8_t pkt[13];
-    pkt[0]  = 0x08; pkt[1]  = 0xA5;  // CMD 0xA508
-    pkt[2]  = r;    pkt[3]  = g;    pkt[4]  = b;
-    pkt[5]  = on_ms  & 0xFF;  pkt[6]  = (on_ms  >> 8) & 0xFF;
-    pkt[7]  = off_ms & 0xFF;  pkt[8]  = (off_ms >> 8) & 0xFF;
-    pkt[9]  = work_ms & 0xFF; pkt[10] = (work_ms >> 8) & 0xFF;
-    pkt[11] = (work_ms >> 16) & 0xFF; pkt[12] = (work_ms >> 24) & 0xFF;
-
-    Serial.printf("Wolink LED flash: RGB(%d,%d,%d) on=%dms off=%dms duration=%dms\r\n",
-                  r, g, b, on_ms, off_ms, work_ms);
-    bool ok = dataChar->writeValue(pkt, sizeof(pkt), true);
-
-    pClient->disconnect();
-    vTaskDelay(50 / portTICK_PERIOD_MS);
-    return ok;
-}
-
 // Self-contained Wolink upload: encode image → connect → auth → stream chunks → refresh → wait for status
 bool PrepareAndSendWolink() {
-    static uint8_t last_addr[6];
-    if (memcmp(last_addr, BLE_curr_address, 6) != 0) {
-        BLE_err_counter = 0;
-        memcpy(last_addr, BLE_curr_address, 6);
-    }
-
-    if (!CreateBuffer()) return false;
-
     BLE_compressed_len = wolink_encode_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING);
     if (BLE_compressed_len == 0) {
         FreeBuffer();
@@ -705,6 +489,262 @@ bool PrepareAndSendWolink() {
     return success;
 }
 
+bool PrepareAndConnect(BLE_CONNECTION_TYPE conn_type) {
+    // Create buffer, fill compressed buffer and connect
+    // if the BLE_curr_address changes, reset the error count
+    static uint8_t last_addr[6];
+    if (memcmp(last_addr, BLE_curr_address, 6) != 0) {
+        BLE_err_counter = 0;
+        Serial.printf("BLE new tag: reset error count: %i\r\n", BLE_err_counter);
+        memcpy(last_addr, BLE_curr_address, 6);
+    }
+    uint8_t dataType = 0x00;
+    uint8_t dataTypeArgument = 0x00;
+    uint16_t nextCheckin = 0x00;
+    if (CreateBuffer()) {
+        if (conn_type == BLE_TYPE_WOLINK) {
+            return PrepareAndSendWolink();
+        }
+        if (conn_type == BLE_TYPE_ATC_BLE_OEPL) {
+            BLE_compressed_len = get_ATC_BLE_OEPL_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING, &dataType, &dataTypeArgument, &nextCheckin);
+            if (BLE_compressed_len) {
+                uint8_t md5bytes[16];
+                MD5Builder md5;
+                md5.begin();
+                md5.add(BLE_image_buffer, BLE_compressed_len);
+                md5.calculate();
+                md5.getBytes(md5bytes);
+
+                BLEavaildatainfo.dataType = dataType;
+                BLEavaildatainfo.dataVer = *((uint64_t*)md5bytes);
+                BLEavaildatainfo.dataSize = BLE_compressed_len;
+                BLEavaildatainfo.dataTypeArgument = dataTypeArgument;
+                BLEavaildatainfo.nextCheckIn = nextCheckin;
+                BLEavaildatainfo.checksum = 0;
+                for (uint16_t c = 1; c < sizeof(struct AvailDataInfo); c++) {
+                    BLEavaildatainfo.checksum += (uint8_t)((uint8_t*)&BLEavaildatainfo)[c];
+                }
+            }
+        } else {
+            BLE_compressed_len = compress_image(BLE_curr_address, BLE_image_buffer, BUFFER_MAX_SIZE_COMPRESSING);
+        }
+        Serial.printf("BLE Compressed Length: %i\r\n", BLE_compressed_len);
+        Serial.printf("BLE connection try: %i\r\n", BLE_err_counter);
+        // then we connect to BLE to send the compressed data
+        if (BLE_compressed_len && BLE_connect(BLE_curr_address, conn_type)) {
+            memset(BLE_notify_buffer, 0x00, sizeof(BLE_notify_buffer));
+            ble_main_state = BLE_MAIN_STATE_UPLOAD;
+            BLE_upload_state = BLE_UPLOAD_STATE_INIT;
+            BLE_new_notify = true;  // trigger the upload here
+            return true;
+        }
+    } 
+    FreeBuffer();
+    return false;
+}
+
+void Upload(BLE_CONNECTION_TYPE conn_type) {
+    // We call this each time we get a Notify from the tag, and progress through the upload stages
+    if (BLE_curr_part == 0)
+        Serial.println("BLE Starting Upload");
+    BLE_new_notify = false;
+    BLE_last_notify = millis();
+    switch (conn_type) {
+        default:
+        case BLE_TYPE_GICISKY:
+            BLE_upload_state = BLE_notify_buffer[1];
+            switch (BLE_upload_state) {
+                default:
+                case BLE_UPLOAD_STATE_INIT:
+                    BLE_mini_buff[0] = 0x01;
+                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 1);
+                    break;
+                case BLE_UPLOAD_STATE_SIZE:
+                    BLE_mini_buff[0] = 0x02;
+                    BLE_mini_buff[1] = BLE_compressed_len & 0xff;
+                    BLE_mini_buff[2] = (BLE_compressed_len >> 8) & 0xff;
+                    BLE_mini_buff[3] = (BLE_compressed_len >> 16) & 0xff;
+                    BLE_mini_buff[4] = (BLE_compressed_len >> 24) & 0xff;
+                    BLE_mini_buff[5] = 0x00;
+                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 6);
+                    break;
+                case BLE_UPLOAD_STATE_START:
+                    BLE_mini_buff[0] = 0x03;
+                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, 1);
+                    break;
+                case BLE_UPLOAD_STATE_UPLOAD:
+                    if (BLE_notify_buffer[2] == 0x08) {
+                        // Done and the image is refreshing now
+                        FreeBuffer(true, true);
+                    } else {
+                        uint32_t req_curr_part = (BLE_notify_buffer[6] << 24) | (BLE_notify_buffer[5] << 24) | (BLE_notify_buffer[4] << 24) | BLE_notify_buffer[3];
+                        if (req_curr_part != BLE_curr_part) {
+                            Serial.printf("Something went wrong, expected req part: %i but got: %i we better abort here.\r\n", req_curr_part, BLE_curr_part);
+                            FreeBuffer(false, true);
+                        }
+                        uint32_t curr_len = 240;
+                        if (BLE_compressed_len - (BLE_curr_part * 240) < 240)
+                            curr_len = BLE_compressed_len - (BLE_curr_part * 240);
+                        BLE_mini_buff[0] = BLE_curr_part & 0xff;
+                        BLE_mini_buff[1] = (BLE_curr_part >> 8) & 0xff;
+                        BLE_mini_buff[2] = (BLE_curr_part >> 16) & 0xff;
+                        BLE_mini_buff[3] = (BLE_curr_part >> 24) & 0xff;
+                        memcpy((uint8_t*)&BLE_mini_buff[4], (uint8_t*)&BLE_image_buffer[BLE_curr_part * 240], curr_len);
+                        imgChar->writeValue((const uint8_t*)BLE_mini_buff, curr_len + 4);
+                        Serial.printf("BLE sending part: %i\r\n", BLE_curr_part);
+                        BLE_curr_part++;
+                    }
+                    break;
+            }
+            break;
+        case BLE_TYPE_ATC_BLE_OEPL:
+            switch (BLE_upload_state) {
+                default:
+                case BLE_UPLOAD_STATE_INIT:
+                    BLE_mini_buff[0] = 0x00;
+                    BLE_mini_buff[1] = 0x64;
+                    memcpy((uint8_t*)&BLE_mini_buff[2], &BLEavaildatainfo, sizeof(struct AvailDataInfo));
+                    ctrlChar->writeValue((const uint8_t*)BLE_mini_buff, sizeof(struct AvailDataInfo) + 2);
+                    BLE_upload_state = BLE_UPLOAD_STATE_UPLOAD;
+                    break;
+                case BLE_UPLOAD_STATE_UPLOAD:
+                    uint8_t notifyLen = BLE_notify_buffer[0];
+                    uint16_t notifyCMD = (BLE_notify_buffer[1] << 8) | BLE_notify_buffer[2];
+                    Serial.println("BLE CMD " + String(notifyCMD));
+                    switch (notifyCMD) {
+                        case BLE_CMD_REQ:
+                            if (notifyLen == (sizeof(struct blockRequest) + 2)) {
+                                Serial.println("We got a request for a BLK");
+                                memcpy(&BLEblkRequst, &BLE_notify_buffer[3], sizeof(struct blockRequest));
+                                BLE_curr_part = 0;
+                                ATC_BLE_OEPL_PrepareBlk(BLEblkRequst.blockId);
+                                ATC_BLE_OEPL_SendPart(BLEblkRequst.blockId, BLE_curr_part);
+                            }
+                            break;
+                        case BLE_CMD_ACK_BLKPRT:
+                            BLE_curr_part++;
+                            BLE_err_counter = 0;
+                        case BLE_CMD_ERR_BLKPRT:
+                            if (BLE_curr_part <= BLE_max_block_parts && BLE_err_counter++ < 15) {
+                                ATC_BLE_OEPL_SendPart(BLEblkRequst.blockId, BLE_curr_part);
+                                break;
+                            }  // FALLTROUGH!!! We cancel the upload if we land here since we dont have so many parts of a block!
+                        case BLE_CMD_ACK:
+                        case BLE_CMD_ACK_IS_SHOWN:
+                        case BLE_CMD_ACK_FW_UPDATED:
+                            FreeBuffer(true, true);
+                            break;
+                    }
+                    break;
+            }
+            break;
+    }
+}
+
+// Send a Wolink LED flash command: connect → auth → CMD 0xA508 → disconnect
+// CMD 0xA508: [0x08,0xA5, R, G, B, on_lo, on_hi, off_lo, off_hi, work_0..3]
+bool SendWolinkLedFlash(uint8_t r, uint8_t g, uint8_t b, uint16_t on_ms, uint16_t off_ms, uint32_t work_ms) {
+    uint8_t flippedAddr[6];
+    for (int i = 0; i < 6; i++) flippedAddr[i] = BLE_curr_address[5 - i];
+    NimBLEAddress targetAddr(flippedAddr, BLE_ADDR_PUBLIC);
+
+    if (!pClient) {
+        pClient = NimBLEDevice::createClient();
+        pClient->setConnectionParams(36, 60, 0, 200);
+        pClient->setClientCallbacks(new MyClientCallback(), false);
+    }
+    if (pClient->isConnected()) {
+        pClient->disconnect();
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+    if (!pClient->connect(targetAddr)) {
+        Serial.printf("Wolink LED: connection failed\r\n");
+        return false;
+    }
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+
+    if (!pClient->discoverAttributes()) {
+        Serial.printf("Wolink LED: attribute discovery failed\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLERemoteService* pSvc = pClient->getService(wolinkServiceUUID);
+    if (!pSvc) {
+        Serial.printf("Wolink LED: service not found\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLERemoteCharacteristic* dataChar = pSvc->getCharacteristic(wolinkDataUUID);
+    NimBLERemoteCharacteristic* authChar = pSvc->getCharacteristic(wolinkAuthUUID);
+    if (!dataChar || !authChar) {
+        Serial.printf("Wolink LED: missing characteristic(s)\r\n");
+        pClient->disconnect();
+        return false;
+    }
+
+    NimBLEAttValue challenge = authChar->readValue();
+    if (challenge.size() < 16) {
+        Serial.printf("Wolink LED: auth challenge too short\r\n");
+        pClient->disconnect();
+        return false;
+    }
+    uint8_t response[16];
+    if (!wolinkAesEncrypt(challenge.data(), response)) {
+        pClient->disconnect();
+        return false;
+    }
+    authChar->writeValue(response, 16, false);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    uint8_t pkt[13];
+    pkt[0]  = 0x08; pkt[1]  = 0xA5;  // CMD 0xA508
+    pkt[2]  = r;    pkt[3]  = g;    pkt[4]  = b;
+    pkt[5]  = on_ms  & 0xFF;  pkt[6]  = (on_ms  >> 8) & 0xFF;
+    pkt[7]  = off_ms & 0xFF;  pkt[8]  = (off_ms >> 8) & 0xFF;
+    pkt[9]  = work_ms & 0xFF; pkt[10] = (work_ms >> 8) & 0xFF;
+    pkt[11] = (work_ms >> 16) & 0xFF; pkt[12] = (work_ms >> 24) & 0xFF;
+
+    Serial.printf("Wolink LED flash: RGB(%d,%d,%d) on=%dms off=%dms duration=%dms\r\n",
+                  r, g, b, on_ms, off_ms, work_ms);
+    bool ok = dataChar->writeValue(pkt, sizeof(pkt), true);
+
+    pClient->disconnect();
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    return ok;
+}
+
+bool Wolink_Flash_LED(PendingItem* item) {
+    // Extract ledFlash payload (stored in dataVer + dataSize fields by sendTagCommand)
+    uint8_t payload[12] = {0};
+    memcpy(payload,     &item->pendingdata.availdatainfo.dataVer,  8);
+    memcpy(payload + 8, &item->pendingdata.availdatainfo.dataSize, 4);
+    struct ledFlash* lf = (struct ledFlash*)payload;
+    // Convert RGB332 color1 to RGB888
+    uint8_t r = ((lf->color1 >> 5) & 0x7) * 36;
+    uint8_t g = ((lf->color1 >> 2) & 0x7) * 36;
+    uint8_t b = (lf->color1 & 0x3) * 85;
+    // Map OEPL flash timing to Wolink ms values
+    uint16_t on_ms   = lf->flashSpeed1 ? lf->flashSpeed1 * 100 : 80;
+    uint16_t off_ms  = lf->delay1      ? lf->delay1 * 100      : 500;
+    uint32_t work_ms = lf->repeats     ? lf->repeats * 5000UL  : 5000;
+    Serial.printf("Send Wolink LED Flash CMD %02X%02X%02X%02X%02X%02X%02X%02X\r\n", BLE_curr_address[7], BLE_curr_address[6],BLE_curr_address[5],BLE_curr_address[4],BLE_curr_address[3],BLE_curr_address[2],BLE_curr_address[1],BLE_curr_address[0]);
+    bool ok = SendWolinkLedFlash(r, g, b, on_ms, off_ms, work_ms);
+    Serial.printf("LED Flash CMD %s\r\n", ok ? "completed OK" : "failed");
+    // Dequeue the command and update tag status — do NOT call processXferComplete
+    // as that is designed for image transfers and would delete the existing preview file.
+    if (ok) {
+        dequeueItem(BLE_curr_address);
+        tagRecord* taginfo = tagRecord::findByMAC(BLE_curr_address);
+        if (taginfo != nullptr) {
+            taginfo->pendingCount = countQueueItem(BLE_curr_address);
+            wsSendTaginfo(BLE_curr_address, SYNC_TAGSTATUS);
+        }
+    }
+    return ok;
+}
+
 void BLETask(void* parameter) {
     vTaskDelay(pdMS_TO_TICKS(5000));
     Serial.println("BLE task started");
@@ -720,7 +760,7 @@ void BLETask(void* parameter) {
     pScan->setActiveScan(true);
     pScan->setDuplicateFilter(1);   // filter duplicates until scan is restarted
     BLE_CONNECTION_TYPE conn_type = BLE_TYPE_GICISKY;
-    while (1) {
+    while (1) {     
         switch (ble_main_state) {
             default:
             case BLE_MAIN_STATE_IDLE:
@@ -734,43 +774,22 @@ void BLETask(void* parameter) {
                         Serial.println("Stopping scan for upload...");
                         // Stop the background scan
                         pScan->stop();
-                        Serial.println("BLE Image is pending but we wait a bit");
-                        vTaskDelay(500 / portTICK_PERIOD_MS);                             // We better wait here, since the pending image needs to be created first
-                        if (BLE_curr_address[7] == 0xBB && BLE_curr_address[6] == 0xAA) {
-                            // Wolink BWRY ESL — check pending type before dispatching
-                            PendingItem* item = getQueueItem(BLE_curr_address);
-                            if (item != nullptr
-                                    && item->pendingdata.availdatainfo.dataType == DATATYPE_COMMAND_DATA
-                                    && item->pendingdata.availdatainfo.dataTypeArgument == CMD_DO_LEDFLASH) {
-                                // Extract ledFlash payload (stored in dataVer + dataSize fields by sendTagCommand)
-                                uint8_t payload[12] = {0};
-                                memcpy(payload,     &item->pendingdata.availdatainfo.dataVer,  8);
-                                memcpy(payload + 8, &item->pendingdata.availdatainfo.dataSize, 4);
-                                struct ledFlash* lf = (struct ledFlash*)payload;
-                                // Convert RGB332 color1 to RGB888
-                                uint8_t r = ((lf->color1 >> 5) & 0x7) * 36;
-                                uint8_t g = ((lf->color1 >> 2) & 0x7) * 36;
-                                uint8_t b = (lf->color1 & 0x3) * 85;
-                                // Map OEPL flash timing to Wolink ms values
-                                uint16_t on_ms   = lf->flashSpeed1 ? lf->flashSpeed1 * 100 : 80;
-                                uint16_t off_ms  = lf->delay1      ? lf->delay1 * 100      : 500;
-                                uint32_t work_ms = lf->repeats     ? lf->repeats * 5000UL  : 5000;
-                                bool ok = SendWolinkLedFlash(r, g, b, on_ms, off_ms, work_ms);
-                                dequeueItem(BLE_curr_address);
-                                struct espXferComplete reportStruct = {0};
-                                memcpy(reportStruct.src, BLE_curr_address, 8);
-                                if (ok) processXferComplete(&reportStruct, true);
-                                else    processXferTimeout(&reportStruct, true);
-                            } else {
-                                PrepareAndSendWolink();
-                            }
+                        conn_type = Get_Connection_Type(BLE_curr_address);
+                        // Wolink BWRY ESL — check pending type before dispatching
+                        PendingItem* item = getQueueItem(BLE_curr_address);
+                        if (item != nullptr
+                            && item->pendingdata.availdatainfo.dataType == DATATYPE_COMMAND_DATA
+                            && item->pendingdata.availdatainfo.dataTypeArgument == CMD_DO_LEDFLASH) {
+                            if (conn_type == BLE_TYPE_WOLINK) Wolink_Flash_LED(item);
+                            else dequeueItem(BLE_curr_address);
                         } else {
-                            conn_type = BLE_curr_address[7] == 0x13 && BLE_curr_address[6] == 0x37 ? BLE_TYPE_ATC_BLE_OEPL : BLE_TYPE_GICISKY;
+                            Serial.println("BLE Image is pending but we wait a bit");
+                            vTaskDelay(500 / portTICK_PERIOD_MS);                             // We better wait here, since the pending image needs to be created first
                             PrepareAndConnect(conn_type);
                         }
-                        BLE_last_pending_check = millis();
                     }
-                }
+                    BLE_last_pending_check = millis();
+                }   
                 break;
             case BLE_MAIN_STATE_UPLOAD:
                 if (BLE_connected && BLE_new_notify) {

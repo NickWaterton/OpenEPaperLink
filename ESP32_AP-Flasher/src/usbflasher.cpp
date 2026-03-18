@@ -17,6 +17,7 @@ USBCDC USBSerial;
 #include "powermgt.h"
 #include "settings.h"
 #include "swd.h"
+#include "storage.h"
 #include "web.h"
 #include "webflasher.h"
 #include "zbs_interface.h"
@@ -364,6 +365,7 @@ void processFlasherCommand(struct flasherCommand* cmd, uint8_t transportType) {
             wsSerial("reset");
             sendFlasherAnswer(cmd->command, NULL, 0, transportType);
             delay(100);
+            prepareRestart();
             ESP.restart();
             break;
         case CMD_SET_POWER:

@@ -16,6 +16,7 @@
 #include "system.h"
 #include "tag_db.h"
 #include "udp.h"
+#include "storage.h"
 #include "web.h"
 #include "ips_display.h"
 #include "tag_db.h"
@@ -173,6 +174,7 @@ void WifiManager::poll() {
                 Serial.println("WiFi Configurations Cleared!");
             }
             delay(100);
+            prepareRestart();
             ESP.restart();
         }
     }

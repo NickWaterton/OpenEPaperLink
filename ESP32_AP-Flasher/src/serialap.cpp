@@ -1071,6 +1071,7 @@ void APTask(void* parameter) {
                 SD_CARD_MOSI == FLASHER_AP_MOSI) {
                 Serial.println("Reseting in 30 seconds to restore SPI state!\r\n");
                 flashCountDown(30);
+                prepareRestart();
                 ESP.restart();
             }
 #endif
